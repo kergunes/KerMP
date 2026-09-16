@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.exe
+.text
+.rdata
+.data
+.pdata
+.reloc
+reference/
+third_party_reference/
+research/reference/
+

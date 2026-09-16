@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kermp"
+version = "0.0.1"
+description = "KerMP fast-start LAN coordination layer for The Sims 4 multiplayer experiments"
+requires-python = ">=3.10"
+
+[project.scripts]
+kermp = "kermp.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
