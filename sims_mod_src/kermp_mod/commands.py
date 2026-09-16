@@ -52,9 +52,16 @@ def kermp_core_status(_connection=None):
 def kermp_distributor_status(_connection=None):
     result = inspect_distributor_boundary()
     out = _out(_connection)
-    out('distributor_methods=%s omega_methods=%s error=%s' %
-        (','.join(result.get('distributor') or []) or 'none',
-         ','.join(result.get('client_omega') or []) or 'none', result.get('error') or 'none'))
+    out('modules=%s client_type=%s omega_type=%s error=%s omega_error=%s' %
+        (','.join(result.get('modules') or []) or 'none',
+         result.get('client_type') or 'none', result.get('omega_type') or 'none',
+         result.get('error') or 'none', result.get('omega_error') or 'none'))
+    out('distributor_methods=%s' % (','.join(result.get('distributor') or []) or 'none'))
+    out('distributor_instance_methods=%s' %
+        (','.join(result.get('distributor_instance') or []) or 'none'))
+    out('client_methods=%s' % (','.join(result.get('client_methods') or []) or 'none'))
+    out('omega_methods=%s' % (','.join(result.get('client_omega') or []) or 'none'))
+    out('view_update_consts=%s' % (result.get('consts') or {}))
     for name, signature in sorted((result.get('distributor_signatures') or {}).items()):
         out('distributor.%s signature=%s' % (name, signature))
 
