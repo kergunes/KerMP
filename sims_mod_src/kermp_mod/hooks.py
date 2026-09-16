@@ -86,7 +86,7 @@ def enumerate_sims():
                 continue
             name = getattr(info, 'full_name', None) or ('%s %s' %
                     (getattr(info, 'first_name', ''), getattr(info, 'last_name', ''))).strip()
-        result.append({'sim_id': str(sim_id), 'name': name or str(sim_id), 'controllers': []})
+            result.append({'sim_id': str(sim_id), 'name': name or str(sim_id), 'controllers': []})
     except Exception as exc:
         _log('KERMP SIM ENUM ERROR %s: %s' % (type(exc).__name__, exc))
     _last_sims = result
@@ -174,7 +174,7 @@ def _apply_raw_game_message(payload):
 
 
 def flush_travel_buffer():
-    global _travel_buffering, _travel_buffer
+    global _travel_buffering, _travel_buffer, _view_updates_received
     queued = list(_travel_buffer)
     _travel_buffer = []
     _travel_buffering = False
