@@ -601,22 +601,21 @@ def _invoke_native_travel(payload):
     if not actor_ids:
         raise ValueError('travel_actor_not_found')
     sig = inspect.signature(fn)
-    kwargs = {}
-    for name, param in sig.parameters.items():
-        lower = name.lower()
-        if 'zone' in lower and ('id' in lower or lower == 'zone'):
-            kwargs[name] = zone_id
-        elif 'sim' in lower and ('id' in lower or 'ids' in lower):
-            kwargs[name] = actor_ids if lower.endswith('ids') or 'ids' in lower else actor_ids[0]
-    missing = [n for n, p in sig.parameters.items()
-               if p.default is inspect.Parameter.empty and n not in kwargs and
-               p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) and
-               n not in ('self', 'connection', '_connection')]
-    if missing:
-        raise RuntimeError('travel_signature_requires_unmapped=%s signature=%s' % (missing, sig))
+    from server_commands.argument_helpers import OptionalTargetParam
+    try:
+        import services
+        client = services.get_first_client()
+        active = getattr(client, 'active_sim_info', None) if client else None
+        active_id = int(active.id) if active is not None else None
+    except Exception:
+        active_id = None
+    if active_id is None:
+        raise ValueError('travel_actor_not_found')
+    traveling = [sim_id for sim_id in actor_ids if int(sim_id) != active_id]
+    opt_sim = OptionalTargetParam(str(active_id))
     _travel_native_bypass = True
     try:
-        return fn(**kwargs)
+        return fn(opt_sim, zone_id, *traveling)
     finally:
         _travel_native_bypass = False
 
