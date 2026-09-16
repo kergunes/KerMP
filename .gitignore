@@ -11,4 +11,8 @@ __pycache__/
 reference/
 third_party_reference/
 research/reference/
-
+native/*.pyd
+native/*.lib
+native/*.exp
+native/*.pdb
+KerMPNative.obj
