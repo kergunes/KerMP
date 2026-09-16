@@ -942,9 +942,10 @@ def _install_wrapper(label, factory):
         }.get(label, ('objects.client_object_mixin',
                       'set_definition' if label == 'definition_hook' else '_resend_client_scale'))
         module = __import__(module_name, fromlist=[attr])
-        target = getattr(module, attr, None)
-        if target is None and label in ('definition_hook', 'scale_hook'):
+        if label in ('definition_hook', 'scale_hook'):
             target = getattr(module, 'ClientObjectMixin')
+        else:
+            target = module
         original = getattr(target, attr)
         if getattr(original, '_kermp_wrapped', False):
             return True
