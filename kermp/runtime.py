@@ -29,6 +29,10 @@ class HostRuntime:
         self.bridge.start()
         await self.host.start()
 
+    async def stop(self) -> None:
+        self.bridge.close()
+        await self.host.close()
+
     def _bridge_event_from_thread(self, event: BridgeEvent) -> None:
         if self.loop:
             asyncio.run_coroutine_threadsafe(self._on_game_event(event), self.loop)
@@ -124,11 +128,15 @@ class HostRuntime:
             if not self.host.session.build.request_lock(self.host.player_id):
                 self.bridge.send("build.lock_state", {"owner_id": self.host.session.build.lock.owner_id})
                 return
-            op = self.host.session.build.submit(
-                self.host.player_id,
-                str(event.payload.get("op")),
-                dict(event.payload.get("data") or {}),
-            )
+            try:
+                op = self.host.session.build.submit(
+                    self.host.player_id,
+                    str(event.payload.get("op")),
+                    dict(event.payload.get("data") or {}),
+                )
+            except (PermissionError, ValueError, TypeError) as exc:
+                self.bridge.send(MessageType.ERROR.value, {"reason": str(exc)})
+                return
             payload = {"op_seq": op.seq, "player_id": op.player_id, "op": op.op, "data": op.data}
             self.bridge.send(MessageType.BUILD_APPLY.value, payload)
             await self.host.broadcast(MessageType.BUILD_APPLY, payload)
@@ -260,6 +268,10 @@ class ClientRuntime:
         self.loop = asyncio.get_running_loop()
         self.bridge.start()
         return await self.client.connect()
+
+    async def stop(self) -> None:
+        self.bridge.close()
+        await self.client.close()
 
     def _bridge_event_from_thread(self, event: BridgeEvent) -> None:
         if self.loop:

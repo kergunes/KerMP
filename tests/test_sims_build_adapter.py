@@ -43,6 +43,31 @@ def test_capture_is_rejected_during_remote_apply():
     assert observed == [False]
 
 
+def test_object_definition_and_scale_roundtrip():
+    adapter = SimsBuildAdapter()
+    applied = []
+    adapter.configure(apply=applied.append)
+    assert adapter.apply_remote({"op": "object.definition", "op_seq": 2,
+                                "data": {"object_id": 123, "definition_id": 456}})
+    assert adapter.apply_remote({"op": "object.scale", "op_seq": 3,
+                                "data": {"object_id": 123, "scale": 1.25}})
+    assert applied[0]["data"]["object_id"] == "123"
+    assert applied[1]["data"]["scale"] == 1.25
+
+
+def test_parent_and_clear_parent_are_suppressed_and_idempotent():
+    adapter = SimsBuildAdapter()
+    observed = []
+    adapter.configure(apply=observed.append)
+    payload = {"op": "object.set_parent", "op_seq": 4,
+               "data": {"object_id": "1", "parent_id": "2", "slot_hash": "x"}}
+    assert adapter.apply_remote(payload)
+    assert not adapter.apply_remote(payload)
+    assert adapter.apply_remote({"op": "object.clear_parent", "op_seq": 5,
+                                 "data": {"object_id": "1"}})
+    assert len(observed) == 2
+
+
 def test_contour_delta_reports_added_and_removed_normalized_values():
     before = [{'level': 0, 'start': [1, 1], 'end': [2, 1]}]
     after = before + [{'level': 0, 'start': [2, 1], 'end': [3, 1]}]

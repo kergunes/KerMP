@@ -37,6 +37,8 @@ _travel_zone_reported = False
 _travel_local_zone_loaded = False
 _travel_selected_sim_restored = False
 _travel_last_error = None
+_build_hook_info = {}
+_build_last_error = None
 
 
 def _log(message):
@@ -46,6 +48,14 @@ def _log(message):
         logger.info(message)
     except Exception:
         pass
+
+
+def _safe_signature(value):
+    try:
+        import inspect
+        return str(inspect.signature(value))
+    except Exception as exc:
+        return '<unavailable:%s>' % type(exc).__name__
 
 
 def install():
@@ -66,6 +76,7 @@ def install():
     bridge.on('game.raw_message', _raw_game_message)
     bridge.start()
     _install_build_buy_hooks()
+    _install_object_build_hooks()
     _install_wall_contour_callback()
     _install_zone_hooks()
     _install_game_message_capture()
@@ -295,17 +306,27 @@ def _apply_raw_game_message(payload):
         client = services.get_first_client()
         if client is None:
             raise ValueError('first_client_unavailable')
-        omega = getattr(client, 'omega', None)
-        if omega is None:
-            raise ValueError('omega_unavailable')
-        send = getattr(omega, 'send', None)
-        if not callable(send):
-            raise ValueError('omega_send_unavailable')
         msg_id = int(payload['msg_id'])
-        send(msg_id, raw)
+        # Current builds expose the distributor transport as the global omega
+        # module.  Keep the client.omega path only as a compatibility fallback.
+        try:
+            import omega as omega_module
+        except Exception:
+            omega_module = None
+        send = getattr(omega_module, 'send', None) if omega_module is not None else None
+        if not callable(send):
+            client_omega = getattr(client, 'omega', None)
+            send = getattr(client_omega, 'send', None)
+            if not callable(send):
+                raise ValueError('global_omega_send_unavailable')
+            send(msg_id, raw)
+            path = 'client.omega.send(msg_id, raw)'
+        else:
+            send(int(getattr(client, 'id')), msg_id, raw)
+            path = 'omega.send(client.id, msg_id, raw)'
         _last_view_update_size = len(raw)
         _last_view_update_msg_id = msg_id
-        _log('KERMP DISTRIBUTOR APPLY msg_id=%s size=%s' % (msg_id, len(raw)))
+        _log('KERMP DISTRIBUTOR APPLY path=%s msg_id=%s size=%s' % (path, msg_id, len(raw)))
         return True
     except Exception as exc:
         _log('KERMP DISTRIBUTOR APPLY ERROR %s: %s' % (type(exc).__name__, exc))
@@ -330,6 +351,7 @@ def inspect_distributor_boundary():
         'client_methods': [], 'client_omega': [], 'client_type': None,
         'omega_type': None, 'omega_repr': None, 'omega_send_callable': False,
         'capture_installed': _game_message_capture_installed,
+        'global_omega_type': None, 'global_omega_send_callable': False,
         'consts': {}, 'error': None,
     }
 
@@ -337,6 +359,13 @@ def inspect_distributor_boundary():
         needles = ('op', 'message', 'view', 'send', 'process', 'flush', 'distribut')
         return sorted(name for name in names
                       if not name.startswith('__') and any(n in name.lower() for n in needles))[:60]
+
+    try:
+        import omega as omega_module
+        result['global_omega_type'] = type(omega_module).__name__
+        result['global_omega_send_callable'] = callable(getattr(omega_module, 'send', None))
+    except Exception as exc:
+        result['global_omega_error'] = '%s: %s' % (type(exc).__name__, exc)
 
     try:
         import inspect
@@ -832,6 +861,99 @@ def _install_build_buy_hooks():
         _log('KERMP Build/Buy lifecycle hooks installed')
     except Exception:
         _log('KERMP Build/Buy lifecycle hooks unavailable')
+
+
+def _install_object_build_hooks():
+    """Reconnaissance for current-build object boundaries.
+
+    These APIs vary between Sims builds.  We record only callable symbols and
+    do not monkey-patch a function until a build-specific signature is known.
+    The primitive apply path below is safe and is used for authoritative remote
+    operations when the corresponding object API exists.
+    """
+    global _build_hook_info
+    candidates = {
+        'create_hook': ('build_buy', 'c_api_create_object'),
+        'move_hook': ('build_buy', 'c_api_set_object_location_ex'),
+        'funds_hook': ('build_buy', 'c_api_modify_household_funds'),
+        'destroy_hook': ('objects.system', 'c_api_destroy_object'),
+        'parent_hook': ('build_buy', 'c_api_set_parent_object'),
+        'clear_parent_hook': ('build_buy', 'c_api_clear_parent_object'),
+    }
+    result = {}
+    for label, (module_name, attr) in candidates.items():
+        try:
+            module = __import__(module_name, fromlist=[attr])
+            value = getattr(module, attr, None)
+            result[label] = {'available': callable(value),
+                             'signature': _safe_signature(value) if callable(value) else None}
+        except Exception as exc:
+            result[label] = {'available': False, 'error': type(exc).__name__}
+    try:
+        from objects.components import types as component_types
+        mixin = getattr(component_types, 'ClientObjectMixin', None)
+    except Exception:
+        mixin = None
+    for label, attr in (('definition_hook', 'set_definition'), ('scale_hook', '_resend_client_scale')):
+        value = getattr(mixin, attr, None) if mixin is not None else None
+        result[label] = {'available': callable(value),
+                         'signature': _safe_signature(value) if callable(value) else None}
+    _build_hook_info = result
+    adapter.hooks = result
+    adapter.configure(apply=_apply_object_operation)
+    _log('KERMP BUILD OBJECT HOOKS %s' % result)
+
+
+def build_object_status():
+    return {'hooks': _build_hook_info, 'adapter': adapter.status(),
+            'last_error': _build_last_error}
+
+
+def _apply_object_operation(operation):
+    """Apply only operations whose current-build Python object API is explicit."""
+    global _build_last_error
+    data = operation.get('data') or {}
+    op = operation.get('op')
+    if op == 'object.create':
+        raise ValueError('object.create requires current-build create signature verification')
+    try:
+        import services
+        object_id = int(str(data.get('object_id')))
+        obj = services.object_manager().get(object_id)
+        if obj is None:
+            raise ValueError('object_not_found:%s' % object_id)
+        if op == 'object.destroy':
+            import objects.system
+            objects.system.destroy_object(obj)
+        elif op == 'object.definition':
+            setter = getattr(obj, 'set_definition', None)
+            if not callable(setter):
+                raise ValueError('set_definition_unavailable')
+            setter(int(str(data.get('definition_id'))))
+        elif op == 'object.scale':
+            if not hasattr(obj, 'scale'):
+                raise ValueError('scale_unavailable')
+            obj.scale = float(data.get('scale'))
+        elif op in ('object.set_parent', 'object.clear_parent'):
+            setter = getattr(obj, 'set_parent', None)
+            if not callable(setter):
+                raise ValueError('set_parent_unavailable')
+            setter(None if op == 'object.clear_parent' else
+                   services.object_manager().get(int(str(data.get('parent_id')))))
+        elif op == 'object.move':
+            transform = data.get('transform') or {}
+            location = transform.get('location') if isinstance(transform, dict) else None
+            if location is None:
+                raise ValueError('move_transform_location_unavailable')
+            from sims4.math import Vector3
+            obj.location = Vector3(float(location[0]), float(location[1]), float(location[2]))
+        elif op == 'funds.modify':
+            raise ValueError('funds.modify is host-authoritative and not a client object apply')
+        else:
+            raise ValueError('unsupported object apply: %s' % op)
+    except Exception as exc:
+        _build_last_error = '%s: %s' % (type(exc).__name__, exc)
+        raise
 
 
 def _install_zone_hooks():

@@ -9,6 +9,14 @@ import json
 import inspect
 
 
+OBJECT_OPERATIONS = (
+    'object.create', 'object.destroy', 'object.move', 'object.definition',
+    'object.scale', 'object.set_parent', 'object.clear_parent', 'funds.modify',
+    'wall.create', 'wall.delete',
+)
+OBJECT_ID_OPERATIONS = set(OBJECT_OPERATIONS) - set(('wall.create', 'wall.delete', 'funds.modify'))
+
+
 def _json_value(value, depth=0):
     """Make a bounded, deterministic representation of game return values."""
     if depth > 5:
@@ -113,9 +121,18 @@ def normalize_operation(payload):
     payload = payload or {}
     data = payload.get('data') or {}
     op = str(payload.get('op') or '')
-    if op not in ('wall.create', 'wall.delete'):
+    if op not in OBJECT_OPERATIONS:
         raise ValueError('unsupported build operation: %s' % op)
     normalized = {'op': op, 'data': dict(data)}
+    if op in OBJECT_ID_OPERATIONS and not str(normalized['data'].get('object_id', '')):
+        raise ValueError('object_id is required')
+    if op == 'object.create' and not str(normalized['data'].get('definition_id', '')):
+        raise ValueError('definition_id is required')
+    if op == 'funds.modify' and not str(normalized['data'].get('household_id', '')):
+        raise ValueError('household_id is required')
+    for key in ('object_id', 'parent_id', 'definition_id', 'household_id', 'zone_id'):
+        if key in normalized['data'] and normalized['data'][key] is not None:
+            normalized['data'][key] = str(normalized['data'][key])
     op_id = payload.get('op_id', payload.get('op_seq'))
     if op_id is not None:
         normalized['op_id'] = str(op_id)
@@ -131,6 +148,9 @@ class SimsBuildAdapter(object):
         self.last_remote_operation = None
         self.applying_remote = False
         self.probe_before = None
+        self.operation_counts = {}
+        self.last_error = None
+        self.hooks = {}
 
     def configure(self, capture=None, apply=None):
         self._capture = capture
@@ -147,12 +167,21 @@ class SimsBuildAdapter(object):
     def capture_local(self, payload):
         if self.applying_remote:
             return False
-        operation = normalize_operation(payload)
+        try:
+            operation = normalize_operation(payload)
+        except Exception as exc:
+            self.last_error = '%s: %s' % (type(exc).__name__, exc)
+            return False
         self.last_local_operation = operation
+        self.operation_counts[operation['op']] = self.operation_counts.get(operation['op'], 0) + 1
         return operation
 
     def apply_remote(self, payload):
-        operation = normalize_operation(payload)
+        try:
+            operation = normalize_operation(payload)
+        except Exception as exc:
+            self.last_error = '%s: %s' % (type(exc).__name__, exc)
+            return False
         key = operation.get('op_id') or json.dumps(operation, sort_keys=True)
         if key in self._seen:
             return False
@@ -163,9 +192,25 @@ class SimsBuildAdapter(object):
         self.applying_remote = True
         try:
             self._apply(operation)
+            self.operation_counts[operation['op']] = self.operation_counts.get(operation['op'], 0) + 1
+        except Exception as exc:
+            self.last_error = '%s: %s' % (type(exc).__name__, exc)
+            raise
         finally:
             self.applying_remote = False
         return True
+
+    def status(self):
+        return {
+            'capture_hook': bool(self._capture),
+            'apply_hook': bool(self._apply),
+            'suppression_active': self.applying_remote,
+            'last_local_operation': self.last_local_operation,
+            'last_remote_operation': self.last_remote_operation,
+            'operation_counts': dict(self.operation_counts),
+            'hooks': dict(self.hooks),
+            'last_error': self.last_error,
+        }
 
     def replay_last(self):
         if not self.last_local_operation:
@@ -201,5 +246,8 @@ def build_buy_surface():
         'register_build_buy_enter_callback', 'register_build_buy_exit_callback',
         'wall_contour_update_callbacks', 'get_wall_contours',
         'c_api_wall_contour_update', 'is_in_build_buy',
+        'c_api_create_object', 'c_api_set_object_location_ex',
+        'c_api_modify_household_funds', 'c_api_set_parent_object',
+        'c_api_clear_parent_object',
     )
     return {'module_available': True, 'candidates': [name for name in wanted if name in names]}

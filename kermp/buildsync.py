@@ -5,6 +5,42 @@ from typing import Any, Dict, Optional, Iterable
 import time
 
 
+OBJECT_OPERATIONS = {
+    "object.create", "object.destroy", "object.move", "object.definition",
+    "object.scale", "object.set_parent", "object.clear_parent", "funds.modify",
+    "wall.create", "wall.delete",
+}
+_MAX_BUILD_DATA_KEYS = 32
+_MAX_BUILD_VALUE_LENGTH = 4096
+
+
+def _validate_build_data(op: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    if op not in OBJECT_OPERATIONS:
+        raise ValueError("unsupported build operation: %s" % op)
+    if not isinstance(data, dict) or len(data) > _MAX_BUILD_DATA_KEYS:
+        raise ValueError("invalid build operation data")
+    result = dict(data)
+    for key, value in result.items():
+        if not isinstance(key, str) or len(key) > 128:
+            raise ValueError("invalid build operation key")
+        if isinstance(value, str) and len(value) > _MAX_BUILD_VALUE_LENGTH:
+            raise ValueError("build operation value too large")
+    for key in ("object_id", "parent_id", "definition_id", "household_id", "zone_id", "routing_surface_id"):
+        if key in result and result[key] is not None:
+            result[key] = str(result[key])
+    if op.startswith("object."):
+        if not str(result.get("object_id", "")) and op != "object.create":
+            raise ValueError("object_id is required")
+    if op == "object.create" and not str(result.get("definition_id", "")):
+        raise ValueError("definition_id is required")
+    if op == "funds.modify":
+        if not str(result.get("household_id", "")):
+            raise ValueError("household_id is required")
+        if not isinstance(result.get("amount"), (int, float)):
+            raise ValueError("funds amount must be numeric")
+    return result
+
+
 @dataclass(slots=True)
 class BuildLock:
     owner_id: str
@@ -61,6 +97,7 @@ class BuildAuthority:
             self.lock = None
         if not self.lock or self.lock.owner_id != player_id:
             raise PermissionError("build operation submitted without authority")
+        data = _validate_build_data(op, data)
         self.lock.acquired_at = time.monotonic()
         self._seq += 1
         operation = BuildOperation(f"build-{self._seq}", self._seq, player_id, op, data)

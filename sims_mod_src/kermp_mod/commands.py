@@ -57,6 +57,8 @@ def kermp_distributor_status(_connection=None):
          result.get('client_type') or 'none', result.get('omega_type') or 'none',
          result.get('omega_send_callable'), result.get('capture_installed'),
          result.get('error') or 'none', result.get('omega_error') or 'none'))
+    out('global_omega_type=%s global_omega_send_callable=%s' %
+        (result.get('global_omega_type') or 'none', result.get('global_omega_send_callable')))
     out('distributor_methods=%s' % (','.join(result.get('distributor') or []) or 'none'))
     out('distributor_instance_methods=%s' %
         (','.join(result.get('distributor_instance') or []) or 'none'))
@@ -190,6 +192,9 @@ def kermp_build_status(_connection=None):
     event = wall_event_probe()
     out('wall_callback_available=%s registered=%s events=%s' %
         (event['attribute_exists'], event['registered'], event['event_count']))
+    out('object_hooks=%s' % hooks.build_object_status().get('hooks'))
+    out('operation_counts=%s last_error=%s' %
+        (adapter.status().get('operation_counts'), adapter.status().get('last_error') or 'none'))
 
 
 @sims4.commands.Command('kermp.native.status', command_type=sims4.commands.CommandType.Live)

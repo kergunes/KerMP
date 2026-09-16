@@ -1,4 +1,45 @@
-# KerMP fast-start — v0.0.1
+# KerMP — LAN multiplayer sidecar and Build/Buy foundations
+
+## Windows GUI
+
+The normal startup path is now the real desktop application (no terminal is
+required):
+
+```powershell
+python -m kermp.gui
+# or scripts\\gui.bat
+```
+
+Choose **Host game** or **Join game**. The GUI starts the actual
+`HostRuntime`/`ClientRuntime` in a background asyncio thread, shows the LAN
+address, player/session state, bridge waiting state, and keeps a small local
+JSON preference file at `%LOCALAPPDATA%\\KerMP\\gui.json`. Stop/Disconnect
+closes the bridge and network sockets. Windows Firewall may need to allow
+Python/KerMP on Private networks; the GUI does not modify firewall rules.
+
+The GUI's **Build / Install Sims Mod** action invokes the existing packaging
+script. The destination is derived from `Path.home()` or the optional
+`KERMP_SIM_USER_DIR` environment variable; no developer-specific path is
+required.
+
+## Build/Buy object protocol
+
+The authoritative build stream now validates and sequences these normalized
+operations: `object.create`, `object.destroy`, `object.move`,
+`object.definition`, `object.scale`, `object.set_parent`,
+`object.clear_parent`, and `funds.modify`. IDs are transported as JSON-safe
+strings at the Sims adapter boundary, remote application is duplicate-safe and
+suppressed from recapture, and the global build lease remains the v0.1
+authority model.
+
+The Sims script performs current-build symbol reconnaissance for the object
+create/move/destroy/definition/scale/parent/funds boundaries and fails closed
+when a signature is not known. `kermp.build.status` reports these capabilities.
+Natural Build/Buy capture still needs live verification against the installed
+Sims build; this session has no live Sims available, so no runtime acceptance is
+claimed. The client-side ViewUpdate apply now prefers the global
+`omega.send(client.id, msg_id, raw)` path and retains the old client-bound path
+only as a compatibility fallback.
 
 ## REAL SIMS BUILD TEST
 

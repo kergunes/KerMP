@@ -42,6 +42,17 @@ class KerMPHost:
         async with self._server:
             await self._server.serve_forever()
 
+    async def close(self) -> None:
+        for peer in list(self.peers.values()):
+            peer.writer.close()
+            with contextlib.suppress(Exception):
+                await peer.writer.wait_closed()
+        self.peers.clear()
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+
     async def broadcast(self, typ: MessageType | str, payload: dict, include_host: bool = False) -> Envelope:
         self._seq += 1
         env = Envelope.make(typ, payload, self.player_id, seq=self._seq)
@@ -211,3 +222,11 @@ class KerMPClient:
             env = Envelope.from_line(line)
             if self.on_message:
                 await self.on_message(env)
+
+    async def close(self) -> None:
+        if self.writer:
+            self.writer.close()
+            with contextlib.suppress(Exception):
+                await self.writer.wait_closed()
+        self.reader = None
+        self.writer = None

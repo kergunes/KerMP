@@ -12,7 +12,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / 'kermp_mod'
 OUT = ROOT / 'KerMP.ts4script'
-INSTALL_DIR = Path(r'C:\Users\kerem\Documents\Electronic Arts\The Sims 4\Mods\KerMP')
+def default_install_dir():
+    user_dir = os.environ.get('KERMP_SIM_USER_DIR')
+    if user_dir:
+        return Path(user_dir) / 'Mods' / 'KerMP'
+    return Path.home() / 'Documents' / 'Electronic Arts' / 'The Sims 4' / 'Mods' / 'KerMP'
+
+
+INSTALL_DIR = default_install_dir()
 INSTALL_OUT = INSTALL_DIR / OUT.name
 
 
