@@ -3,7 +3,7 @@ import json
 import sims4.commands
 import services
 
-from .hooks import bridge, probe_wall_contours, wall_event_probe
+from .hooks import bridge, probe_wall_contours, wall_event_probe, enumerate_sims
 from .build_adapter import adapter, build_buy_surface
 
 
@@ -27,6 +27,33 @@ def kermp_status(_connection=None):
     except Exception:
         pass
     _out(_connection)('KerMP loaded. zone_id=%s bridge_connected=%s' % (zone_id, bool(bridge.sock)))
+
+
+@sims4.commands.Command('kermp.sims', command_type=sims4.commands.CommandType.Live)
+def kermp_sims(_connection=None):
+    sims = enumerate_sims()
+    bridge.emit('sims.state', {'sims': sims})
+    out = _out(_connection)
+    for sim in sims:
+        out('sim_id=%s name=%s controlled_by=%s' %
+            (sim['sim_id'], sim['name'], sim.get('controlled_by') or 'none'))
+    if not sims:
+        out('no loaded Sims found')
+
+
+@sims4.commands.Command('kermp.sim.select', command_type=sims4.commands.CommandType.Live)
+def kermp_sim_select(sim_id: str, _connection=None):
+    ok = bridge.emit('sim.select', {'sim_id': str(sim_id), 'local': True})
+    _out(_connection)('KerMP sim selection requested sim_id=%s sent=%s' % (sim_id, ok))
+
+
+@sims4.commands.Command('kermp.interact', command_type=sims4.commands.CommandType.Live)
+def kermp_interact(sim_id: str, affordance_id: str, target_id: str = '0', _connection=None):
+    ok = bridge.emit('interaction.request', {'request_id': 'local-%s' % __import__('uuid').uuid4().hex,
+        'player_id': 'local', 'sim_id': str(sim_id), 'affordance_id': str(affordance_id),
+        'target_id': str(target_id)})
+    _out(_connection)('KerMP interaction requested sim=%s affordance=%s target=%s sent=%s' %
+                      (sim_id, affordance_id, target_id, ok))
 
 
 @sims4.commands.Command('kermp.ping', command_type=sims4.commands.CommandType.Live)

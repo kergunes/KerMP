@@ -34,6 +34,15 @@ class MessageType(str, Enum):
 
     SNAPSHOT_REQUEST = "snapshot.request"
     SNAPSHOT = "snapshot"
+    SIM_SELECT = "sim.select"
+    SIM_SELECTION_STATE = "sim.selection_state"
+    SIM_STATE = "sim.state"
+    INTERACTION_REQUEST = "interaction.request"
+    INTERACTION_ACCEPTED = "interaction.accepted"
+    INTERACTION_REJECTED = "interaction.rejected"
+    INTERACTION_STARTED = "interaction.started"
+    INTERACTION_FINISHED = "interaction.finished"
+    INTERACTION_CANCEL = "interaction.cancel"
 
 
 @dataclass(slots=True)

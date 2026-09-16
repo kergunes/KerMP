@@ -36,6 +36,27 @@ class HostRuntime:
             })
             return
 
+        if event.type == MessageType.SIM_SELECT.value:
+            try:
+                state = self.host.session.select_sim(self.host.player_id, str(event.payload.get('sim_id')))
+            except ValueError as exc:
+                self.bridge.send(MessageType.ERROR.value, {'reason': str(exc)})
+                return
+            await self.host.broadcast(MessageType.SIM_SELECTION_STATE, state, include_host=True)
+            return
+
+        if event.type == MessageType.INTERACTION_REQUEST.value:
+            payload = dict(event.payload)
+            payload.setdefault('player_id', self.host.player_id)
+            try:
+                request = self.host.session.validate_interaction(payload.get('request_id'), self.host.player_id, payload)
+            except ValueError as exc:
+                self.bridge.send(MessageType.INTERACTION_REJECTED.value, {'request_id': payload.get('request_id'), 'reason': str(exc)})
+                return
+            self.bridge.send(MessageType.INTERACTION_REQUEST.value, request)
+            await self.host.broadcast(MessageType.INTERACTION_ACCEPTED, request)
+            return
+
         if event.type == MessageType.TRAVEL_REQUEST.value:
             await self._start_travel(event.payload, requested_by=self.host.player_id)
             return
@@ -75,6 +96,17 @@ class HostRuntime:
             payload = {"owner_id": self.host.session.build.lock.owner_id if self.host.session.build.lock else None}
             self.bridge.send(MessageType.BUILD_LOCK_STATE.value, payload)
             await self.host.broadcast(MessageType.BUILD_LOCK_STATE, payload)
+            return
+        if event.type in ("sims.state", "sim.state"):
+            self.host.session.update_sims(event.payload.get("sims", []))
+            await self.host.broadcast(MessageType.SIM_STATE, self.host.session.snapshot())
+            return
+        if event.type in (MessageType.INTERACTION_ACCEPTED.value, MessageType.INTERACTION_REJECTED.value,
+                          MessageType.INTERACTION_STARTED.value, MessageType.INTERACTION_FINISHED.value):
+            request_id = str(event.payload.get("request_id") or "")
+            if request_id in self.host.session.interaction_requests:
+                self.host.session.interaction_requests[request_id]["status"] = event.type.rsplit('.', 1)[-1]
+            await self.host.broadcast(event.type, event.payload)
 
     async def _on_network_message(self, env: Envelope) -> None:
         if env.type == MessageType.TRAVEL_REQUEST.value:
@@ -85,6 +117,13 @@ class HostRuntime:
             await self._travel_zone_ready(env.sender_id, env.payload)
         elif env.type == MessageType.BUILD_APPLY.value:
             self.bridge.send(MessageType.BUILD_APPLY.value, env.payload)
+        elif env.type in (MessageType.SIM_SELECTION_STATE.value, MessageType.SIM_STATE.value):
+            self.bridge.send(env.type, env.payload)
+        elif env.type == MessageType.INTERACTION_ACCEPTED.value:
+            self.bridge.send(MessageType.INTERACTION_REQUEST.value, env.payload)
+        elif env.type in (MessageType.INTERACTION_REJECTED.value, MessageType.INTERACTION_STARTED.value,
+                          MessageType.INTERACTION_FINISHED.value, MessageType.ERROR.value):
+            self.bridge.send(env.type, env.payload)
 
     async def _start_travel(self, payload: dict, requested_by: str) -> None:
         zone_id = str(payload.get("zone_id") or "")
@@ -162,6 +201,12 @@ class ClientRuntime:
             return
         if event.type == MessageType.TRAVEL_REQUEST.value:
             await self.client.send(MessageType.TRAVEL_REQUEST, event.payload)
+            return
+        if event.type == MessageType.SIM_SELECT.value:
+            await self.client.send(MessageType.SIM_SELECT, event.payload)
+            return
+        if event.type == MessageType.INTERACTION_REQUEST.value:
+            await self.client.send(MessageType.INTERACTION_REQUEST, event.payload)
             return
         if event.type in (MessageType.TRAVEL_READY.value, MessageType.TRAVEL_ZONE_READY.value):
             await self.client.send(event.type, event.payload)

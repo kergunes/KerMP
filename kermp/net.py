@@ -75,7 +75,8 @@ class KerMPHost:
             writer.write(Envelope.make(
                 MessageType.WELCOME,
                 {"session_name": self.session.session_name, "session_id": self.session.session_id,
-                 "host_id": self.player_id, "players": [p.display_name for p in self.session.players.values()]},
+                 "host_id": self.player_id, "players": [p.display_name for p in self.session.players.values()],
+                 "snapshot": self.session.snapshot()},
                 self.player_id,
             ).to_line())
             await writer.drain()
@@ -85,6 +86,9 @@ class KerMPHost:
                 if not line:
                     break
                 env = Envelope.from_line(line)
+                if env.sender_id != player_id:
+                    await self._send_error(player_id, 'sender_id_mismatch')
+                    continue
                 peer = self.peers.get(player_id)
                 if peer and env.seq is not None and env.seq <= peer.last_seq:
                     continue
@@ -120,6 +124,22 @@ class KerMPHost:
             granted = self.session.build.request_lock(env.sender_id)
             await self.broadcast(MessageType.BUILD_LOCK_STATE, {"owner_id": self.session.build.lock.owner_id if self.session.build.lock else None, "granted_to": env.sender_id if granted else None})
             return
+        if env.type == MessageType.SIM_SELECT.value:
+            try:
+                state = self.session.select_sim(env.sender_id, str(env.payload.get("sim_id")))
+            except ValueError as exc:
+                await self._send_error(env.sender_id, str(exc))
+                return
+            await self.broadcast(MessageType.SIM_SELECTION_STATE, state, include_host=True)
+            return
+        if env.type == MessageType.INTERACTION_REQUEST.value:
+            try:
+                request = self.session.validate_interaction(env.payload.get("request_id"), env.sender_id, env.payload)
+            except ValueError as exc:
+                await self._send_error(env.sender_id, str(exc))
+                return
+            await self.broadcast(MessageType.INTERACTION_ACCEPTED, request, include_host=True)
+            return
         if env.type == MessageType.BUILD_LOCK_RELEASE.value:
             self.session.build.release_lock(env.sender_id)
             await self.broadcast(MessageType.BUILD_LOCK_STATE, {"owner_id": None})
@@ -138,6 +158,12 @@ class KerMPHost:
 
         if self.on_message:
             await self.on_message(env)
+
+    async def _send_error(self, player_id: str, reason: str) -> None:
+        peer = self.peers.get(player_id)
+        if peer:
+            peer.writer.write(Envelope.make(MessageType.ERROR, {"reason": reason}, self.player_id).to_line())
+            await peer.writer.drain()
 
     async def _drop(self, player_id: str) -> None:
         peer = self.peers.pop(player_id, None)

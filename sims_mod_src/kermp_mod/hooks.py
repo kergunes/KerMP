@@ -16,6 +16,7 @@ _wall_callback_registered = False
 _wall_event_count = 0
 _last_wall_event = None
 _wall_callback_info = {}
+_last_sims = []
 
 
 def _log(message):
@@ -37,6 +38,9 @@ def install():
     bridge.on('travel.resume', _travel_resume)
     bridge.on('build.apply', _build_apply)
     bridge.on('sidecar.welcome', _sidecar_welcome)
+    bridge.on('sim.enumerate', _sim_enumerate)
+    bridge.on('sim.select', _sim_select)
+    bridge.on('interaction.request', _interaction_request)
     bridge.start()
     _install_build_buy_hooks()
     _install_wall_contour_callback()
@@ -46,6 +50,79 @@ def install():
 
 def _sidecar_welcome(payload):
     _log('Sidecar connected role=%s' % payload.get('role'))
+
+
+def enumerate_sims():
+    """Return live SimInfo records; IDs stay strings on the wire."""
+    global _last_sims
+    result = []
+    try:
+        import services
+        manager = services.sim_info_manager()
+        for info in manager.get_all():
+            sim_id = getattr(info, 'id', None)
+            if sim_id is None:
+                continue
+            instance = info.get_sim_instance(allow_hidden_flags=True)
+            if instance is None:
+                continue
+            name = getattr(info, 'full_name', None) or ('%s %s' %
+                    (getattr(info, 'first_name', ''), getattr(info, 'last_name', ''))).strip()
+            result.append({'sim_id': str(sim_id), 'name': name or str(sim_id), 'controlled_by': None})
+    except Exception as exc:
+        _log('KERMP SIM ENUM ERROR %s: %s' % (type(exc).__name__, exc))
+    _last_sims = result
+    return result
+
+
+def _sim_enumerate(_payload):
+    bridge.emit('sims.state', {'sims': enumerate_sims()})
+
+
+def _sim_select(payload):
+    # Selection is authoritative in the sidecar. This event is intentionally
+    # diagnostic only; the host owns player -> Sim and the game owns execution.
+    _log('KERMP SIM SELECT player=%s sim=%s' % (payload.get('player_id'), payload.get('sim_id')))
+
+
+def _resolve_interaction(payload):
+    import services
+    sim_id = int(str(payload['sim_id']))
+    info = services.sim_info_manager().get(sim_id)
+    sim = info.get_sim_instance(allow_hidden_flags=True) if info else None
+    if sim is None:
+        raise ValueError('sim_not_loaded')
+    target_id = payload.get('target_id')
+    target = None
+    if target_id not in (None, '', 0, '0'):
+        target = services.object_manager().get(int(str(target_id)))
+        if target is None:
+            raise ValueError('target_not_found')
+    affordance_id = int(str(payload['affordance_id']))
+    from sims4.resources import Types
+    affordance = services.get_instance_manager(Types.INTERACTION).get(affordance_id)
+    if affordance is None:
+        raise ValueError('affordance_not_found')
+    from interactions.context import InteractionContext, InteractionSource
+    from interactions.priority import Priority
+    context = InteractionContext(sim, InteractionSource.SCRIPT, Priority.High)
+    return sim, affordance, target, context
+
+
+def _interaction_request(payload):
+    request_id = str(payload.get('request_id') or '')
+    try:
+        sim, affordance, target, context = _resolve_interaction(payload)
+        result = sim.push_super_affordance(affordance, target, context)
+        if not result:
+            raise ValueError('push_rejected')
+        bridge.emit('interaction.started', {'request_id': request_id, 'sim_id': payload.get('sim_id'),
+                                            'interaction_id': str(getattr(result, 'id', ''))})
+        _log('KERMP INTERACTION STARTED request=%s sim=%s affordance=%s target=%s' %
+             (request_id, payload.get('sim_id'), payload.get('affordance_id'), payload.get('target_id')))
+    except Exception as exc:
+        bridge.emit('interaction.rejected', {'request_id': request_id, 'reason': '%s: %s' % (type(exc).__name__, exc)})
+        _log('KERMP INTERACTION REJECTED request=%s error=%s' % (request_id, exc))
 
 
 def _travel_prepare(payload):

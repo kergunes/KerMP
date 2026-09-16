@@ -168,6 +168,27 @@ is localhost-only; it does not make the Sims process a LAN server.
 
 In-game diagnostics: `kermp.status`, `kermp.ping`, `kermp.travel.request`,
 `kermp.wall.test`, `kermp.native.status`, and `kermp.native.take`. Expected logs include `sidecar.welcome`, `travel.prepare`,
+
+## Core multiplayer vertical slice
+
+The authoritative host now maintains one `active_sim_id` per player. In a live
+zone, run `kermp.sims` in the host Sims instance to enumerate loaded Sims, then
+assign the host with `kermp.sim.select <sim_id>`. A diagnostic remote Player 2
+can connect with:
+
+```text
+python tools/fake_player.py 127.0.0.1 --player-id player2 --name Player2
+select <sim_b_id>
+interact <interaction_tuning_id> <object_id>
+```
+
+The sidecar validates ownership and sends the accepted request to the real Sims
+host. The script mod resolves `sim_info_manager().get(sim_id)`,
+`object_manager().get(object_id)`, the interaction tuning instance, constructs
+an `InteractionContext`, and calls `sim.push_super_affordance(...)`. No movement
+or animation is faked. Interaction tuning IDs are build-specific and must be
+selected from the installed Sims runtime; the exact live invocation remains a
+runtime acceptance item until exercised in the user's current zone.
 `travel.commit`, `travel.zone_ready`, `travel.resume`, and `build.apply`.
 When broken, collect both sidecar stdout/stderr, the fake-game output, the
 player IDs, host/client LAN IPs and ports, and the first protocol error; do not
