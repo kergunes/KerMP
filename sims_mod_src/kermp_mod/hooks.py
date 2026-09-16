@@ -5,6 +5,7 @@ and the transport contract. The Build/Buy native call remains the hard spike.
 """
 
 import base64
+import functools
 import traceback
 
 from .bridge_client import KerMPBridgeClient
@@ -731,6 +732,26 @@ def capture_build_operation(payload):
     return True
 
 
+def capture_object_build_operation(op, data):
+    """Common natural Build/Buy capture boundary for all object wrappers."""
+    payload = {'op': op, 'data': data}
+    try:
+        operation = adapter.capture_local(payload)
+    except Exception:
+        _log('KERMP BUILD OBJECT CAPTURE ERROR %s' % traceback.format_exc())
+        return False
+    if not operation:
+        return False
+    _log('KERMP BUILD OBJECT CAPTURE type=%s object_id=%s data=%s' %
+         (op, data.get('object_id', 'none'), _bounded_repr(data)))
+    bridge.emit('build.operation', operation)
+    return True
+
+
+def _bounded_repr(value):
+    return repr(value)[:2000]
+
+
 def probe_wall_contours():
     result = adapter.probe()
     snapshot = result['snapshot']
@@ -864,21 +885,15 @@ def _install_build_buy_hooks():
 
 
 def _install_object_build_hooks():
-    """Reconnaissance for current-build object boundaries.
-
-    These APIs vary between Sims builds.  We record only callable symbols and
-    do not monkey-patch a function until a build-specific signature is known.
-    The primitive apply path below is safe and is used for authoritative remote
-    operations when the corresponding object API exists.
-    """
+    """Install wrappers at the current-build Python Build/Buy boundaries."""
     global _build_hook_info
     candidates = {
-        'create_hook': ('build_buy', 'c_api_create_object'),
+        'create_hook': ('objects.system', 'c_api_create_object'),
         'move_hook': ('build_buy', 'c_api_set_object_location_ex'),
         'funds_hook': ('build_buy', 'c_api_modify_household_funds'),
         'destroy_hook': ('objects.system', 'c_api_destroy_object'),
-        'parent_hook': ('build_buy', 'c_api_set_parent_object'),
-        'clear_parent_hook': ('build_buy', 'c_api_clear_parent_object'),
+        'parent_hook': ('objects.system', 'c_api_set_parent_object'),
+        'clear_parent_hook': ('objects.system', 'c_api_clear_parent_object'),
     }
     result = {}
     for label, (module_name, attr) in candidates.items():
@@ -890,8 +905,8 @@ def _install_object_build_hooks():
         except Exception as exc:
             result[label] = {'available': False, 'error': type(exc).__name__}
     try:
-        from objects.components import types as component_types
-        mixin = getattr(component_types, 'ClientObjectMixin', None)
+        from objects.client_object_mixin import ClientObjectMixin
+        mixin = ClientObjectMixin
     except Exception:
         mixin = None
     for label, attr in (('definition_hook', 'set_definition'), ('scale_hook', '_resend_client_scale')):
@@ -901,7 +916,220 @@ def _install_object_build_hooks():
     _build_hook_info = result
     adapter.hooks = result
     adapter.configure(apply=_apply_object_operation)
+    _install_wrapper('move_hook', _wrap_move)
+    _install_wrapper('funds_hook', _wrap_funds)
+    _install_wrapper('create_hook', _wrap_create)
+    _install_wrapper('destroy_hook', _wrap_destroy)
+    _install_wrapper('parent_hook', _wrap_parent)
+    _install_wrapper('clear_parent_hook', _wrap_clear_parent)
+    _install_wrapper('definition_hook', _wrap_definition)
+    _install_wrapper('scale_hook', _wrap_scale)
     _log('KERMP BUILD OBJECT HOOKS %s' % result)
+
+
+def _install_wrapper(label, factory):
+    info = _build_hook_info.get(label) or {}
+    if not info.get('available'):
+        return False
+    try:
+        module_name, attr = {
+            'move_hook': ('build_buy', 'c_api_set_object_location_ex'),
+            'funds_hook': ('build_buy', 'c_api_modify_household_funds'),
+            'create_hook': ('objects.system', 'c_api_create_object'),
+            'destroy_hook': ('objects.system', 'c_api_destroy_object'),
+            'parent_hook': ('objects.system', 'c_api_set_parent_object'),
+            'clear_parent_hook': ('objects.system', 'c_api_clear_parent_object'),
+        }.get(label, ('objects.client_object_mixin',
+                      'set_definition' if label == 'definition_hook' else '_resend_client_scale'))
+        module = __import__(module_name, fromlist=[attr])
+        target = getattr(module, attr, None)
+        if target is None and label in ('definition_hook', 'scale_hook'):
+            target = getattr(module, 'ClientObjectMixin')
+        original = getattr(target, attr)
+        if getattr(original, '_kermp_wrapped', False):
+            return True
+        wrapped = factory(original)
+        wrapped = functools.wraps(original)(wrapped)
+        wrapped._kermp_wrapped = True
+        wrapped._kermp_original = original
+        setattr(target, attr, wrapped)
+        _build_hook_info[label]['installed'] = True
+        return True
+    except Exception as exc:
+        _build_hook_info[label]['install_error'] = '%s: %s' % (type(exc).__name__, exc)
+        return False
+
+
+def _wrap_move(original):
+    def wrapped(*args, **kwargs):
+        result = original(*args, **kwargs)
+        values = dict(zip(('zone_id', 'object_id', 'routing_surface', 'transform',
+                           'parent_id', 'parent_type_info', 'slot_hash'), args))
+        values.update(kwargs)
+        capture_object_build_operation('object.move', {
+            'zone_id': values.get('zone_id'),
+            'object_id': values.get('object_id'),
+            'routing_surface': _json_value(values.get('routing_surface')),
+            'transform': _serialize_transform(values.get('transform')),
+            'parent_id': values.get('parent_id'),
+            'parent_type_info': _json_value(values.get('parent_type_info')),
+            'slot_hash': values.get('slot_hash'),
+        })
+        return result
+    return wrapped
+
+
+def _wrap_funds(original):
+    def wrapped(*args, **kwargs):
+        result = original(*args, **kwargs)
+        values = dict(zip(('amount', 'household_id', 'reason', 'zone_id'), args))
+        values.update(kwargs)
+        capture_object_build_operation('funds.modify', {
+            'amount': values.get('amount'), 'household_id': values.get('household_id'),
+            'reason': values.get('reason'), 'zone_id': values.get('zone_id'),
+        })
+        return result
+    return wrapped
+
+
+def _wrap_create(original):
+    def wrapped(*args, **kwargs):
+        result = original(*args, **kwargs)
+        values = dict(zip(('zone_id', 'definition_id', 'object_id', 'object_state',
+                           'location_type', 'content_source'), args))
+        values.update(kwargs)
+        obj = result if hasattr(result, 'id') else None
+        object_id = values.get('object_id') if values.get('object_id') is not None else getattr(obj, 'id', None)
+        capture_object_build_operation('object.create', {
+            'zone_id': values.get('zone_id'), 'object_id': object_id,
+            'definition_id': values.get('definition_id'),
+            'object_state': _json_value(values.get('object_state')),
+            'location_type': _json_value(values.get('location_type')),
+            'content_source': _json_value(values.get('content_source')),
+            'transform': _serialize_transform(getattr(obj, 'location', None)),
+        })
+        return result
+    return wrapped
+
+
+def _wrap_destroy(original):
+    def wrapped(*args, **kwargs):
+        values = dict(zip(('zone_id', 'object_or_id'), args))
+        values.update(kwargs)
+        target = values.get('object_or_id')
+        object_id = getattr(target, 'id', target)
+        result = original(*args, **kwargs)
+        capture_object_build_operation('object.destroy', {
+            'zone_id': values.get('zone_id'), 'object_id': object_id,
+        })
+        return result
+    return wrapped
+
+
+def _wrap_parent(original):
+    def wrapped(*args, **kwargs):
+        result = original(*args, **kwargs)
+        values = dict(zip(('object_id', 'parent_id', 'transform', 'joint_name', 'slot_hash', 'zone_id'), args))
+        values.update(kwargs)
+        capture_object_build_operation('object.set_parent', {
+            'object_id': values.get('object_id'), 'parent_id': values.get('parent_id'),
+            'transform': _serialize_transform(values.get('transform')),
+            'joint_name': values.get('joint_name'), 'slot_hash': values.get('slot_hash'),
+            'zone_id': values.get('zone_id'),
+        })
+        return result
+    return wrapped
+
+
+def _wrap_clear_parent(original):
+    def wrapped(*args, **kwargs):
+        result = original(*args, **kwargs)
+        values = dict(zip(('object_id', 'transform', 'zone_id', 'surface'), args))
+        values.update(kwargs)
+        capture_object_build_operation('object.clear_parent', {
+            'object_id': values.get('object_id'), 'transform': _serialize_transform(values.get('transform')),
+            'zone_id': values.get('zone_id'), 'routing_surface': _json_value(values.get('surface')),
+        })
+        return result
+    return wrapped
+
+
+def _wrap_definition(original):
+    def wrapped(self, definition_id, *args, **kwargs):
+        previous = getattr(getattr(self, 'definition', None), 'id', None)
+        result = original(self, definition_id, *args, **kwargs)
+        if previous != definition_id:
+            capture_object_build_operation('object.definition', {
+                'object_id': getattr(self, 'id', None), 'definition_id': definition_id,
+            })
+        return result
+    return wrapped
+
+
+def _wrap_scale(original):
+    def wrapped(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        capture_object_build_operation('object.scale', {
+            'object_id': getattr(self, 'id', None), 'scale': getattr(self, 'scale', None),
+        })
+        return result
+    return wrapped
+
+
+def _json_value(value, depth=0):
+    if depth > 5 or value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item, depth + 1) for item in value]
+    try:
+        if hasattr(value, 'value'):
+            return int(value.value)
+    except Exception:
+        pass
+    result = {}
+    for name in ('x', 'y', 'z', 'w', 'primary_id', 'secondary_id', 'type', 'level'):
+        try:
+            if hasattr(value, name):
+                result[name] = _json_value(getattr(value, name), depth + 1)
+        except Exception:
+            pass
+    return result or repr(value)[:500]
+
+
+def _serialize_transform(transform):
+    if transform is None:
+        return None
+    result = {}
+    for name in ('position', 'translation', 'orientation', 'routing_surface'):
+        try:
+            value = getattr(transform, name)
+            result[name] = _json_value(value)
+        except Exception:
+            pass
+    return result or _json_value(transform)
+
+
+def _deserialize_transform(data, fallback=None):
+    if not isinstance(data, dict):
+        return fallback
+    try:
+        from sims4.math import Vector3, Quaternion
+        import routing
+        position = data.get('position') or data.get('translation')
+        orientation = data.get('orientation')
+        if isinstance(position, dict):
+            position = Vector3(float(position.get('x', 0)), float(position.get('y', 0)), float(position.get('z', 0)))
+        if isinstance(orientation, dict):
+            orientation = Quaternion(float(orientation.get('x', 0)), float(orientation.get('y', 0)),
+                                     float(orientation.get('z', 0)), float(orientation.get('w', 1)))
+        surface = data.get('routing_surface')
+        if isinstance(surface, dict):
+            surface = routing.SurfaceIdentifier(int(surface.get('primary_id', 0)),
+                                                 int(surface.get('secondary_id', 0)),
+                                                 int(surface.get('type', 0)))
+        return routing.Location(position, orientation, routing_surface=surface)
+    except Exception:
+        return fallback
 
 
 def build_object_status():
@@ -914,39 +1142,51 @@ def _apply_object_operation(operation):
     global _build_last_error
     data = operation.get('data') or {}
     op = operation.get('op')
-    if op == 'object.create':
-        raise ValueError('object.create requires current-build create signature verification')
     try:
         import services
-        object_id = int(str(data.get('object_id')))
+        zone_id = data.get('zone_id')
+        object_id = int(str(data.get('object_id'))) if data.get('object_id') is not None else None
+        if op == 'object.create':
+            import objects.system
+            result = objects.system.c_api_create_object(
+                zone_id, int(str(data.get('definition_id'))), object_id,
+                data.get('object_state'), data.get('location_type'), data.get('content_source'))
+            obj = result if hasattr(result, 'id') else services.object_manager().get(object_id)
+            if obj is not None and data.get('transform'):
+                obj.location = _deserialize_transform(data.get('transform'), getattr(obj, 'location', None))
+            return True
+        if op == 'object.destroy':
+            import objects.system
+            return bool(objects.system.c_api_destroy_object(zone_id, object_id))
         obj = services.object_manager().get(object_id)
         if obj is None:
             raise ValueError('object_not_found:%s' % object_id)
-        if op == 'object.destroy':
-            import objects.system
-            objects.system.destroy_object(obj)
-        elif op == 'object.definition':
+        if op == 'object.definition':
             setter = getattr(obj, 'set_definition', None)
             if not callable(setter):
                 raise ValueError('set_definition_unavailable')
-            setter(int(str(data.get('definition_id'))))
+            setter(int(str(data.get('definition_id'))), True)
         elif op == 'object.scale':
             if not hasattr(obj, 'scale'):
                 raise ValueError('scale_unavailable')
             obj.scale = float(data.get('scale'))
-        elif op in ('object.set_parent', 'object.clear_parent'):
-            setter = getattr(obj, 'set_parent', None)
-            if not callable(setter):
-                raise ValueError('set_parent_unavailable')
-            setter(None if op == 'object.clear_parent' else
-                   services.object_manager().get(int(str(data.get('parent_id')))))
+        elif op == 'object.set_parent':
+            import objects.system
+            objects.system.c_api_set_parent_object(
+                object_id, int(str(data.get('parent_id'))),
+                _deserialize_transform(data.get('transform'), getattr(obj, 'location', None)),
+                data.get('joint_name'), data.get('slot_hash'), zone_id)
+        elif op == 'object.clear_parent':
+            import objects.system
+            objects.system.c_api_clear_parent_object(
+                object_id, _deserialize_transform(data.get('transform'), getattr(obj, 'location', None)),
+                zone_id, data.get('routing_surface'))
         elif op == 'object.move':
-            transform = data.get('transform') or {}
-            location = transform.get('location') if isinstance(transform, dict) else None
-            if location is None:
-                raise ValueError('move_transform_location_unavailable')
-            from sims4.math import Vector3
-            obj.location = Vector3(float(location[0]), float(location[1]), float(location[2]))
+            import build_buy
+            build_buy.c_api_set_object_location_ex(
+                zone_id, object_id, data.get('routing_surface'),
+                _deserialize_transform(data.get('transform'), getattr(obj, 'location', None)),
+                data.get('parent_id'), data.get('parent_type_info'), data.get('slot_hash'))
         elif op == 'funds.modify':
             raise ValueError('funds.modify is host-authoritative and not a client object apply')
         else:

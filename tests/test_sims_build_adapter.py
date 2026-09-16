@@ -68,6 +68,18 @@ def test_parent_and_clear_parent_are_suppressed_and_idempotent():
     assert len(observed) == 2
 
 
+def test_capture_counters_ids_and_duplicate_definition_filter():
+    adapter = SimsBuildAdapter()
+    first = adapter.capture_local({"op": "object.definition", "data": {"object_id": 7, "definition_id": 8}})
+    duplicate = adapter.capture_local({"op": "object.definition", "data": {"object_id": 7, "definition_id": 8}})
+    assert first["op_id"] == "local-1"
+    assert duplicate is False
+    assert adapter.captured_total == 1
+    adapter.applying_remote = True
+    assert adapter.capture_local({"op": "object.scale", "data": {"object_id": 7, "scale": 1.0}}) is False
+    assert adapter.suppressed_remote_echo == 1
+
+
 def test_contour_delta_reports_added_and_removed_normalized_values():
     before = [{'level': 0, 'start': [1, 1], 'end': [2, 1]}]
     after = before + [{'level': 0, 'start': [2, 1], 'end': [3, 1]}]

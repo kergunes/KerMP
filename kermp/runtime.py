@@ -137,7 +137,8 @@ class HostRuntime:
             except (PermissionError, ValueError, TypeError) as exc:
                 self.bridge.send(MessageType.ERROR.value, {"reason": str(exc)})
                 return
-            payload = {"op_seq": op.seq, "player_id": op.player_id, "op": op.op, "data": op.data}
+            payload = {"op_seq": op.seq, "op_id": op.data.get("op_id"),
+                       "player_id": op.player_id, "op": op.op, "data": op.data}
             self.bridge.send(MessageType.BUILD_APPLY.value, payload)
             await self.host.broadcast(MessageType.BUILD_APPLY, payload)
             return

@@ -151,6 +151,13 @@ class SimsBuildAdapter(object):
         self.operation_counts = {}
         self.last_error = None
         self.hooks = {}
+        self.captured_total = 0
+        self.suppressed_remote_echo = 0
+        self.capture_errors = 0
+        self.last_capture = None
+        self.last_capture_error = None
+        self._last_definition = {}
+        self._capture_sequence = 0
 
     def configure(self, capture=None, apply=None):
         self._capture = capture
@@ -166,13 +173,26 @@ class SimsBuildAdapter(object):
 
     def capture_local(self, payload):
         if self.applying_remote:
+            self.suppressed_remote_echo += 1
             return False
         try:
             operation = normalize_operation(payload)
         except Exception as exc:
             self.last_error = '%s: %s' % (type(exc).__name__, exc)
+            self.capture_errors += 1
+            self.last_capture_error = self.last_error
             return False
+        if operation['op'] == 'object.definition':
+            object_id = operation['data'].get('object_id')
+            definition_id = operation['data'].get('definition_id')
+            if self._last_definition.get(object_id) == definition_id:
+                return False
+            self._last_definition[object_id] = definition_id
+        self._capture_sequence += 1
+        operation['op_id'] = str(payload.get('op_id') or 'local-%s' % self._capture_sequence)
         self.last_local_operation = operation
+        self.last_capture = operation
+        self.captured_total += 1
         self.operation_counts[operation['op']] = self.operation_counts.get(operation['op'], 0) + 1
         return operation
 
@@ -210,6 +230,11 @@ class SimsBuildAdapter(object):
             'operation_counts': dict(self.operation_counts),
             'hooks': dict(self.hooks),
             'last_error': self.last_error,
+            'captured_total': self.captured_total,
+            'suppressed_remote_echo': self.suppressed_remote_echo,
+            'capture_errors': self.capture_errors,
+            'last_capture': self.last_capture,
+            'last_capture_error': self.last_capture_error,
         }
 
     def replay_last(self):

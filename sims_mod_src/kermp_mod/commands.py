@@ -195,6 +195,9 @@ def kermp_build_status(_connection=None):
     out('object_hooks=%s' % hooks.build_object_status().get('hooks'))
     out('operation_counts=%s last_error=%s' %
         (adapter.status().get('operation_counts'), adapter.status().get('last_error') or 'none'))
+    status = adapter.status()
+    out('captured_total=%s suppressed_remote_echo=%s capture_errors=%s' %
+        (status.get('captured_total'), status.get('suppressed_remote_echo'), status.get('capture_errors')))
 
 
 @sims4.commands.Command('kermp.native.status', command_type=sims4.commands.CommandType.Live)
