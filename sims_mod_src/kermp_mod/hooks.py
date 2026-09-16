@@ -4,6 +4,7 @@ Today this module proves script loading, sidecar connectivity, zone-load readine
 and the transport contract. The Build/Buy native call remains the hard spike.
 """
 
+import base64
 import traceback
 
 from .bridge_client import KerMPBridgeClient
@@ -23,6 +24,11 @@ _travel_buffering = False
 _travel_buffer = []
 _MAX_TRAVEL_BUFFER = 256
 _view_updates_received = 0
+_view_updates_sent = 0
+_last_view_update_size = 0
+_last_view_update_msg_id = None
+_game_message_capture_installed = False
+_MAX_RAW_GAME_MESSAGE_BYTES = 2 * 1024 * 1024
 
 
 def _log(message):
@@ -52,6 +58,7 @@ def install():
     _install_build_buy_hooks()
     _install_wall_contour_callback()
     _install_zone_hooks()
+    _install_game_message_capture()
     _log('KerMP installed')
 
 
@@ -59,6 +66,81 @@ def _sidecar_welcome(payload):
     global _sidecar_role
     _sidecar_role = payload.get('role')
     _log('Sidecar connected role=%s' % payload.get('role'))
+
+
+def _view_update_message_id():
+    try:
+        from protocolbuffers import Consts_pb2
+        return int(getattr(Consts_pb2, 'MSG_OBJECTS_VIEW_UPDATE'))
+    except Exception:
+        return None
+
+
+def _install_game_message_capture():
+    """Observe host Client.send_message and forward native ViewUpdate bytes."""
+    global _game_message_capture_installed
+    if _game_message_capture_installed:
+        return True
+    try:
+        from server.client import Client
+        original = getattr(Client, 'send_message', None)
+        if original is None:
+            _log('KERMP DISTRIBUTOR CAPTURE unavailable reason=Client.send_message_missing')
+            return False
+        if getattr(original, '_kermp_wrapped', False):
+            _game_message_capture_installed = True
+            return True
+
+        def wrapped(self, *args, **kwargs):
+            global _view_updates_sent, _last_view_update_size, _last_view_update_msg_id
+            result = original(self, *args, **kwargs)
+            try:
+                if _sidecar_role != 'host':
+                    return result
+                msg_id = kwargs.get('msg_id')
+                if msg_id is None and args:
+                    msg_id = args[0]
+                expected = _view_update_message_id()
+                if expected is None or int(msg_id) != expected:
+                    return result
+                message = kwargs.get('msg')
+                if message is None:
+                    message = kwargs.get('message')
+                if message is None and len(args) > 1:
+                    message = args[1]
+                serializer = getattr(message, 'SerializeToString', None)
+                if not callable(serializer):
+                    _log('KERMP DISTRIBUTOR CAPTURE skipped reason=message_not_serializable')
+                    return result
+                raw = serializer()
+                if not isinstance(raw, (bytes, bytearray)):
+                    raw = bytes(raw)
+                if len(raw) > _MAX_RAW_GAME_MESSAGE_BYTES:
+                    _log('KERMP DISTRIBUTOR CAPTURE skipped reason=payload_too_large size=%s' % len(raw))
+                    return result
+                sent = bridge.emit('game.raw_message', {
+                    'msg_id': int(msg_id),
+                    'payload_b64': base64.b64encode(raw).decode('ascii'),
+                })
+                if sent:
+                    _view_updates_sent += 1
+                    _last_view_update_size = len(raw)
+                    _last_view_update_msg_id = int(msg_id)
+                    _log('KERMP DISTRIBUTOR CAPTURE msg_id=%s size=%s count=%s' %
+                         (msg_id, len(raw), _view_updates_sent))
+            except Exception:
+                _log('KERMP DISTRIBUTOR CAPTURE ERROR %s' % traceback.format_exc())
+            return result
+
+        wrapped._kermp_wrapped = True
+        wrapped._kermp_original = original
+        Client.send_message = wrapped
+        _game_message_capture_installed = True
+        _log('KERMP DISTRIBUTOR CAPTURE installed Client.send_message')
+        return True
+    except Exception:
+        _log('KERMP DISTRIBUTOR CAPTURE install error %s' % traceback.format_exc())
+        return False
 
 
 def _raw_game_message(payload):
@@ -190,9 +272,33 @@ def receive_raw_game_message(payload):
 
 
 def _apply_raw_game_message(payload):
-    # The client-side Distributor application is build-specific and is installed by
-    # the optional capture/apply hook below once its exact API is observed.
-    return False
+    """Deliver one authoritative host game message into the local Sims client."""
+    global _last_view_update_size, _last_view_update_msg_id
+    if _sidecar_role != 'client':
+        return False
+    try:
+        raw = base64.b64decode(str(payload.get('payload_b64', '')), validate=True)
+        if len(raw) > _MAX_RAW_GAME_MESSAGE_BYTES:
+            raise ValueError('payload_too_large')
+        import services
+        client = services.get_first_client()
+        if client is None:
+            raise ValueError('first_client_unavailable')
+        omega = getattr(client, 'omega', None)
+        if omega is None:
+            raise ValueError('omega_unavailable')
+        send = getattr(omega, 'send', None)
+        if not callable(send):
+            raise ValueError('omega_send_unavailable')
+        msg_id = int(payload['msg_id'])
+        send(msg_id, raw)
+        _last_view_update_size = len(raw)
+        _last_view_update_msg_id = msg_id
+        _log('KERMP DISTRIBUTOR APPLY msg_id=%s size=%s' % (msg_id, len(raw)))
+        return True
+    except Exception as exc:
+        _log('KERMP DISTRIBUTOR APPLY ERROR %s: %s' % (type(exc).__name__, exc))
+        return False
 
 
 def flush_travel_buffer():
@@ -211,7 +317,9 @@ def inspect_distributor_boundary():
     result = {
         'modules': [], 'distributor': [], 'distributor_instance': [],
         'client_methods': [], 'client_omega': [], 'client_type': None,
-        'omega_type': None, 'omega_repr': None, 'consts': {}, 'error': None,
+        'omega_type': None, 'omega_repr': None, 'omega_send_callable': False,
+        'capture_installed': _game_message_capture_installed,
+        'consts': {}, 'error': None,
     }
 
     def interesting(names):
@@ -265,6 +373,7 @@ def inspect_distributor_boundary():
             if omega is not None:
                 result['omega_type'] = type(omega).__name__
                 result['omega_repr'] = repr(omega)[:300]
+                result['omega_send_callable'] = callable(getattr(omega, 'send', None))
                 public = sorted(name for name in dir(omega) if not name.startswith('__'))
                 result['client_omega'] = interesting(public)
                 if not result['client_omega']:
