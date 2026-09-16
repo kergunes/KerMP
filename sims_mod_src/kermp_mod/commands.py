@@ -52,9 +52,10 @@ def kermp_core_status(_connection=None):
 def kermp_distributor_status(_connection=None):
     result = inspect_distributor_boundary()
     out = _out(_connection)
-    out('modules=%s client_type=%s omega_type=%s error=%s omega_error=%s' %
+    out('modules=%s client_type=%s omega_type=%s omega_send_callable=%s capture_installed=%s error=%s omega_error=%s' %
         (','.join(result.get('modules') or []) or 'none',
          result.get('client_type') or 'none', result.get('omega_type') or 'none',
+         result.get('omega_send_callable'), result.get('capture_installed'),
          result.get('error') or 'none', result.get('omega_error') or 'none'))
     out('distributor_methods=%s' % (','.join(result.get('distributor') or []) or 'none'))
     out('distributor_instance_methods=%s' %
