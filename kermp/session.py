@@ -29,9 +29,9 @@ class HostSession:
         p = Player(player_id, display_name)
         self.players[player_id] = p
         saved = self.reconnect_sim_ids.get(player_id)
-        if saved in self.sims and self.sim_owner(saved) is None:
+        if saved in self.sims:
             p.active_sim_id = saved
-            self.sims[saved]['controlled_by'] = player_id
+            self._set_sim_controllers(saved)
         return p
 
     def remove_player(self, player_id: str) -> None:
@@ -39,9 +39,8 @@ class HostSession:
         if player and player.active_sim_id:
             self.reconnect_sim_ids[player_id] = player.active_sim_id
         self.players.pop(player_id, None)
-        for sim in self.sims.values():
-            if sim.get("controlled_by") == player_id:
-                sim["controlled_by"] = None
+        for sim_id in self.sims:
+            self._set_sim_controllers(sim_id)
         if self.build.lock and self.build.lock.owner_id == player_id:
             self.build.lock = None
             self.build._lease_id = None
@@ -57,8 +56,10 @@ class HostSession:
     def update_sims(self, sims: list[dict]) -> None:
         previous = self.sims
         self.sims = {str(s["sim_id"]): {"sim_id": str(s["sim_id"]), "name": str(s.get("name", "")),
-                                        "controlled_by": s.get("controlled_by", previous.get(str(s["sim_id"]), {}).get("controlled_by"))}
+                                        "controllers": list(s.get("controllers") or previous.get(str(s["sim_id"]), {}).get("controllers", []))}
                      for s in sims if s.get("sim_id") is not None}
+        for sim_id in self.sims:
+            self._set_sim_controllers(sim_id)
 
     def sim_owner(self, sim_id: str) -> Optional[str]:
         return next((p.player_id for p in self.players.values() if p.active_sim_id == str(sim_id)), None)
@@ -67,13 +68,15 @@ class HostSession:
         sim_id = str(sim_id)
         if player_id not in self.players: raise ValueError("unknown_player")
         if sim_id not in self.sims: raise ValueError("invalid_sim_id")
-        owner = self.sim_owner(sim_id)
-        if owner and owner != player_id: raise ValueError("sim_already_controlled")
         player = self.players[player_id]
-        if player.active_sim_id in self.sims: self.sims[player.active_sim_id]["controlled_by"] = None
         player.active_sim_id = sim_id
-        self.sims[sim_id]["controlled_by"] = player_id
-        return {"player_id": player_id, "sim_id": sim_id, "name": self.sims[sim_id]["name"], "controlled_by": player_id}
+        self._set_sim_controllers(sim_id)
+        return {"player_id": player_id, "sim_id": sim_id, "name": self.sims[sim_id]["name"],
+                "controllers": list(self.sims[sim_id]["controllers"])}
+
+    def _set_sim_controllers(self, sim_id: str) -> None:
+        controllers = [p.player_id for p in self.players.values() if p.active_sim_id == str(sim_id)]
+        self.sims[sim_id]["controllers"] = controllers
 
     def validate_interaction(self, request_id: str, player_id: str, payload: dict) -> dict:
         request_id = str(request_id or "")

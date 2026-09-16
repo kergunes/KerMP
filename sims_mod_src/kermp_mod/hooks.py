@@ -17,6 +17,12 @@ _wall_event_count = 0
 _last_wall_event = None
 _wall_callback_info = {}
 _last_sims = []
+_sidecar_role = None
+_travel_epoch = 0
+_travel_buffering = False
+_travel_buffer = []
+_MAX_TRAVEL_BUFFER = 256
+_view_updates_received = 0
 
 
 def _log(message):
@@ -41,6 +47,7 @@ def install():
     bridge.on('sim.enumerate', _sim_enumerate)
     bridge.on('sim.select', _sim_select)
     bridge.on('interaction.request', _interaction_request)
+    bridge.on('game.raw_message', _raw_game_message)
     bridge.start()
     _install_build_buy_hooks()
     _install_wall_contour_callback()
@@ -49,7 +56,18 @@ def install():
 
 
 def _sidecar_welcome(payload):
+    global _sidecar_role
+    _sidecar_role = payload.get('role')
     _log('Sidecar connected role=%s' % payload.get('role'))
+
+
+def _raw_game_message(payload):
+    if _sidecar_role != 'client':
+        _log('KERMP RAW MESSAGE IGNORED role=%s' % _sidecar_role)
+        return
+    if receive_raw_game_message(payload):
+        _log('KERMP RAW MESSAGE RECEIVED msg_id=%s size=%s' %
+             (payload.get('msg_id'), len(str(payload.get('payload_b64', '')))))
 
 
 def enumerate_sims():
@@ -68,10 +86,134 @@ def enumerate_sims():
                 continue
             name = getattr(info, 'full_name', None) or ('%s %s' %
                     (getattr(info, 'first_name', ''), getattr(info, 'last_name', ''))).strip()
-            result.append({'sim_id': str(sim_id), 'name': name or str(sim_id), 'controlled_by': None})
+        result.append({'sim_id': str(sim_id), 'name': name or str(sim_id), 'controllers': []})
     except Exception as exc:
         _log('KERMP SIM ENUM ERROR %s: %s' % (type(exc).__name__, exc))
     _last_sims = result
+    return result
+
+
+def enumerate_objects(limit=40):
+    """Bounded, current-zone object diagnostics; IDs come from the live manager."""
+    result = []
+    try:
+        import services
+        manager = services.object_manager()
+        for obj in manager.get_all():
+            if len(result) >= int(limit):
+                break
+            obj_id = getattr(obj, 'id', None)
+            if obj_id is None:
+                continue
+            name = getattr(obj, 'definition', None)
+            name = getattr(name, 'name', None) or getattr(obj, 'full_name', None) or type(obj).__name__
+            result.append({'object_id': str(obj_id), 'name': str(name), 'type': type(obj).__name__})
+    except Exception as exc:
+        _log('KERMP OBJECT ENUM ERROR %s: %s' % (type(exc).__name__, exc))
+    return result
+
+
+def _object(object_id):
+    import services
+    obj = services.object_manager().get(int(str(object_id)))
+    if obj is None:
+        raise ValueError('object_not_found')
+    return obj
+
+
+def enumerate_affordances(object_id, sim_id=None, limit=40):
+    """Inspect only affordance collections exposed by this installed build."""
+    obj = _object(object_id)
+    candidates = []
+    for attr in ('super_affordances', 'affordances', 'available_affordances'):
+        value = getattr(obj, attr, None)
+        if value is not None:
+            try:
+                candidates = list(value)
+                break
+            except Exception:
+                pass
+    result = []
+    for affordance in candidates[:int(limit)]:
+        aid = getattr(affordance, 'guid64', None) or getattr(affordance, 'guid', None) or getattr(affordance, 'id', None)
+        if aid is None:
+            continue
+        name = getattr(affordance, '__name__', None) or getattr(affordance, 'display_name', None) or type(affordance).__name__
+        result.append({'affordance_id': str(aid), 'name': str(name)})
+    return result
+
+
+def begin_travel_buffer(epoch):
+    global _travel_epoch, _travel_buffering, _travel_buffer
+    _travel_epoch = int(epoch)
+    _travel_buffering = True
+    _travel_buffer = []
+
+
+def receive_raw_game_message(payload):
+    global _travel_buffer, _view_updates_received
+    if _travel_buffering:
+        if len(_travel_buffer) >= _MAX_TRAVEL_BUFFER:
+            _log('KERMP VIEW UPDATE BUFFER FULL epoch=%s' % _travel_epoch)
+            return False
+        if int(payload.get('epoch', _travel_epoch)) != _travel_epoch:
+            _log('KERMP STALE VIEW UPDATE epoch=%s expected=%s' % (payload.get('epoch'), _travel_epoch))
+            return False
+        _travel_buffer.append(payload)
+        return True
+    applied = _apply_raw_game_message(payload)
+    if applied:
+        _view_updates_received += 1
+    return applied
+
+
+def _apply_raw_game_message(payload):
+    # The client-side Distributor application is build-specific and is installed by
+    # the optional capture/apply hook below once its exact API is observed.
+    return False
+
+
+def flush_travel_buffer():
+    global _travel_buffering, _travel_buffer
+    queued = list(_travel_buffer)
+    _travel_buffer = []
+    _travel_buffering = False
+    for payload in queued:
+        if _apply_raw_game_message(payload):
+            _view_updates_received += 1
+    return len(queued)
+
+
+def inspect_distributor_boundary():
+    """Report only APIs present in the installed build; never guesses a call."""
+    result = {'modules': [], 'distributor': [], 'client_omega': [], 'error': None}
+    try:
+        import inspect
+        import distributor
+        result['modules'].append('distributor')
+        cls = getattr(distributor, 'Distributor', None)
+        if cls is not None:
+            result['distributor'] = sorted(name for name in dir(cls)
+                                           if 'op' in name.lower() or 'message' in name.lower() or 'view' in name.lower())[:40]
+            result['distributor_signatures'] = {}
+            for name in result['distributor']:
+                member = getattr(cls, name, None)
+                if callable(member):
+                    try:
+                        result['distributor_signatures'][name] = str(inspect.signature(member))[:200]
+                    except Exception:
+                        result['distributor_signatures'][name] = 'uninspectable'
+    except Exception as exc:
+        result['error'] = '%s: %s' % (type(exc).__name__, exc)
+    try:
+        import services
+        client = services.get_first_client()
+        omega = getattr(client, 'omega', None) if client else None
+        if omega is not None:
+            result['client_omega'] = sorted(name for name in dir(omega)
+                                            if 'send' in name.lower() or 'message' in name.lower())[:40]
+    except Exception as exc:
+        result['omega_error'] = '%s: %s' % (type(exc).__name__, exc)
     return result
 
 
@@ -128,6 +270,8 @@ def _interaction_request(payload):
 def _travel_prepare(payload):
     global _pending_travel_txn
     _pending_travel_txn = payload.get('txn_id')
+    if _sidecar_role == 'client':
+        begin_travel_buffer(payload.get('epoch', 0))
     # v0.0.1 is immediately ready after storing local state. Selected-Sim/camera
     # snapshots are added once the travel call itself is bound.
     bridge.emit('travel.ready', {'txn_id': _pending_travel_txn})
@@ -136,6 +280,8 @@ def _travel_prepare(payload):
 def _travel_commit(payload):
     global _pending_travel_txn
     _pending_travel_txn = payload.get('txn_id')
+    if _sidecar_role == 'client':
+        begin_travel_buffer(payload.get('epoch', 0))
     # TODO HARD SPIKE: call the game's travel service for payload['zone_id'].
     # Do not fake zone_ready here: the zone-load hook below must emit it only
     # after the destination has actually loaded.
@@ -143,6 +289,8 @@ def _travel_commit(payload):
 
 
 def _travel_resume(payload):
+    if _sidecar_role == 'client':
+        flush_travel_buffer()
     _log('Travel barrier complete txn=%s' % payload.get('txn_id'))
 
 

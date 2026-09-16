@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections import deque
 from typing import Deque, Optional
 
 from .bridge import BridgeEvent, LocalGameBridge
 from .net import KerMPHost, KerMPClient
-from .protocol import Envelope, MessageType
+from .protocol import Envelope, MessageType, MAX_GAME_MESSAGE_BYTES
 
 
 class HostRuntime:
@@ -17,6 +18,10 @@ class HostRuntime:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.bridge = LocalGameBridge(bridge_port, self._bridge_event_from_thread)
         self.host.on_message = self._on_network_message
+        self.view_updates_sent = 0
+        self.last_view_update_size = 0
+        self.last_view_update_msg_id = None
+        self._game_sequence = 0
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -34,6 +39,24 @@ class HostRuntime:
                 "player_id": self.host.player_id,
                 "protocol_version": 1,
             })
+            return
+
+        if event.type == MessageType.GAME_RAW_MESSAGE.value:
+            try:
+                msg_id = int(event.payload['msg_id'])
+                raw = base64.b64decode(str(event.payload['payload_b64']), validate=True)
+                if len(raw) > MAX_GAME_MESSAGE_BYTES:
+                    raise ValueError('payload_too_large')
+            except Exception as exc:
+                self.bridge.send(MessageType.ERROR.value, {'reason': 'raw_message_invalid:%s' % exc})
+                return
+            self._game_sequence += 1
+            payload = {'msg_id': msg_id, 'sequence': self._game_sequence,
+                       'payload_b64': base64.b64encode(raw).decode('ascii')}
+            self.view_updates_sent += 1
+            self.last_view_update_size = len(raw)
+            self.last_view_update_msg_id = msg_id
+            await self.host.broadcast(MessageType.GAME_RAW_MESSAGE, payload)
             return
 
         if event.type == MessageType.SIM_SELECT.value:
@@ -181,6 +204,14 @@ class ClientRuntime:
         self.client.on_message = self._on_network_message
         self.pending_build: Deque[dict] = deque()
         self.owns_build_lock = False
+        self.view_updates_received = 0
+        self.last_view_update_size = 0
+        self.last_view_update_msg_id = None
+        self._last_game_sequence = 0
+        self.travel_epoch = 0
+        self.buffer_view_updates = False
+        self.buffered_view_updates = []
+        self.max_buffered_view_updates = 256
 
     async def start(self) -> Envelope:
         self.loop = asyncio.get_running_loop()
@@ -199,6 +230,7 @@ class ClientRuntime:
                 "protocol_version": 1,
             })
             return
+        # A client only sends local input upstream; it never echoes host game messages.
         if event.type == MessageType.TRAVEL_REQUEST.value:
             await self.client.send(MessageType.TRAVEL_REQUEST, event.payload)
             return
@@ -226,9 +258,43 @@ class ClientRuntime:
             await self.client.send(MessageType.BUILD_LOCK_RELEASE)
 
     async def _on_network_message(self, env: Envelope) -> None:
+        if env.type == MessageType.GAME_RAW_MESSAGE.value:
+            sequence = int(env.payload.get('sequence', 0))
+            if sequence <= self._last_game_sequence:
+                return
+            try:
+                raw = base64.b64decode(str(env.payload['payload_b64']), validate=True)
+                if len(raw) > MAX_GAME_MESSAGE_BYTES:
+                    raise ValueError('payload_too_large')
+            except Exception as exc:
+                self.bridge.send('sidecar.error', {'reason': 'raw_message_invalid:%s' % exc})
+                return
+            epoch = env.payload.get('epoch')
+            if epoch is not None and self.travel_epoch and int(epoch) != self.travel_epoch:
+                self.bridge.send('sidecar.error', {'reason': 'stale_travel_epoch'})
+                return
+            self._last_game_sequence = sequence
+            if self.buffer_view_updates:
+                if len(self.buffered_view_updates) >= self.max_buffered_view_updates:
+                    self.bridge.send('sidecar.error', {'reason': 'view_update_buffer_full'})
+                    return
+                self.buffered_view_updates.append(dict(env.payload))
+                self.buffered_view_updates.sort(key=lambda item: int(item.get('sequence', 0)))
+            else:
+                self._apply_game_message(env.payload)
+            return
         if env.type == MessageType.TRAVEL_PROPOSE.value:
+            self.travel_epoch = int(env.payload.get('epoch', self.travel_epoch + 1))
+            self.buffer_view_updates = True
+            self.buffered_view_updates = []
             self.bridge.send("travel.prepare", env.payload)
-        elif env.type in (MessageType.TRAVEL_COMMIT.value, MessageType.TRAVEL_RESUME.value, MessageType.TRAVEL_ABORT.value):
+        elif env.type == MessageType.TRAVEL_RESUME.value:
+            for payload in sorted(self.buffered_view_updates, key=lambda item: int(item.get('sequence', 0))):
+                self._apply_game_message(payload)
+            self.buffered_view_updates = []
+            self.buffer_view_updates = False
+            self.bridge.send(env.type, env.payload)
+        elif env.type in (MessageType.TRAVEL_COMMIT.value, MessageType.TRAVEL_ABORT.value):
             self.bridge.send(env.type, env.payload)
         elif env.type == MessageType.BUILD_LOCK_STATE.value:
             owner = env.payload.get("owner_id")
@@ -245,3 +311,9 @@ class ClientRuntime:
         while self.pending_build and self.owns_build_lock:
             payload = self.pending_build.popleft()
             await self.client.send(MessageType.BUILD_OPERATION, payload)
+
+    def _apply_game_message(self, payload: dict) -> None:
+        self.view_updates_received += 1
+        self.last_view_update_size = len(base64.b64decode(str(payload['payload_b64'])))
+        self.last_view_update_msg_id = int(payload['msg_id'])
+        self.bridge.send(MessageType.GAME_RAW_MESSAGE.value, payload)

@@ -193,3 +193,23 @@ runtime acceptance item until exercised in the user's current zone.
 When broken, collect both sidecar stdout/stderr, the fake-game output, the
 player IDs, host/client LAN IPs and ports, and the first protocol error; do not
 include account or entitlement data.
+
+## Live interaction and replication diagnostics
+
+In the loaded host Sims zone:
+
+```text
+kermp.objects
+kermp.affordances <object_id>
+kermp.sims
+kermp.core.status
+kermp.distributor.status
+```
+
+`kermp.objects` and `kermp.affordances` use bounded live-manager enumeration;
+they do not invent tuning IDs. The sidecar now accepts multiple controllers for
+the same Sim, forwards bounded base64 `game.raw_message` packets from host to
+clients in order, rejects oversize/stale packets, and buffers client packets
+during a travel epoch. Actual Sims Distributor capture/application, natural UI
+interaction interception, and real Sims travel execution remain runtime-bound
+items until verified against the installed build.

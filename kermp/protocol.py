@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, Dict, Optional
 
 PROTOCOL_VERSION = 1
+MAX_GAME_MESSAGE_BYTES = 2 * 1024 * 1024
 
 
 class MessageType(str, Enum):
@@ -43,6 +44,7 @@ class MessageType(str, Enum):
     INTERACTION_STARTED = "interaction.started"
     INTERACTION_FINISHED = "interaction.finished"
     INTERACTION_CANCEL = "interaction.cancel"
+    GAME_RAW_MESSAGE = "game.raw_message"
 
 
 @dataclass(slots=True)

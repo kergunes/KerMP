@@ -5,7 +5,7 @@ from kermp.runtime import HostRuntime, ClientRuntime
 from kermp.session import HostSession
 
 
-def test_player_sim_ownership_and_validation():
+def test_player_sim_selection_and_validation():
     session = HostSession()
     session.add_player('host', 'Host')
     session.add_player('p2', 'Player2')
@@ -19,11 +19,7 @@ def test_player_sim_ownership_and_validation():
         assert False
     except ValueError as exc:
         assert str(exc) == 'duplicate_request_id'
-    try:
-        session.select_sim('host', '2')
-        assert False
-    except ValueError as exc:
-        assert str(exc) == 'sim_already_controlled'
+    assert session.select_sim('host', '2')['controllers'] == ['host', 'p2']
 
 
 def test_disconnect_releases_sim_and_snapshot_persists_mapping():
@@ -33,7 +29,7 @@ def test_disconnect_releases_sim_and_snapshot_persists_mapping():
     session.select_sim('p2', '99')
     assert session.snapshot()['players'][0]['active_sim_id'] == '99'
     session.remove_player('p2')
-    assert session.sims['99']['controlled_by'] is None
+    assert session.sims['99']['controllers'] == []
     session.add_player('p2', 'Player2')
     assert session.players['p2'].active_sim_id == '99'
 

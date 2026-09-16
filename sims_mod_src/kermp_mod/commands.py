@@ -3,7 +3,9 @@ import json
 import sims4.commands
 import services
 
-from .hooks import bridge, probe_wall_contours, wall_event_probe, enumerate_sims
+from . import hooks
+from .hooks import (bridge, probe_wall_contours, wall_event_probe, enumerate_sims,
+                    enumerate_objects, enumerate_affordances, inspect_distributor_boundary)
 from .build_adapter import adapter, build_buy_surface
 
 
@@ -29,14 +31,42 @@ def kermp_status(_connection=None):
     _out(_connection)('KerMP loaded. zone_id=%s bridge_connected=%s' % (zone_id, bool(bridge.sock)))
 
 
+@sims4.commands.Command('kermp.core.status', command_type=sims4.commands.CommandType.Live)
+def kermp_core_status(_connection=None):
+    out = _out(_connection)
+    sims = enumerate_sims()
+    active = sims[0]['sim_id'] if len(sims) == 1 else 'unknown'
+    out('role=%s player_id=local active_sim_id=%s connected_players=unknown' %
+        (hooks._sidecar_role or 'unknown', active))
+    out('interaction_requests=unknown interaction_started=unknown view_updates_sent=%s' %
+        getattr(hooks, '_view_updates_sent', 0))
+    out('view_updates_received=%s last_view_update_size=%s last_view_update_msg_id=%s' %
+        (getattr(hooks, '_view_updates_received', 0), getattr(hooks, '_last_view_update_size', 0),
+         getattr(hooks, '_last_view_update_msg_id', 'unknown')))
+    out('travel_state=%s travel_epoch=%s buffered_view_updates=%s timeline_mode=normal' %
+        ('pending' if hooks._pending_travel_txn else 'idle', hooks._travel_epoch,
+         len(hooks._travel_buffer)))
+
+
+@sims4.commands.Command('kermp.distributor.status', command_type=sims4.commands.CommandType.Live)
+def kermp_distributor_status(_connection=None):
+    result = inspect_distributor_boundary()
+    out = _out(_connection)
+    out('distributor_methods=%s omega_methods=%s error=%s' %
+        (','.join(result.get('distributor') or []) or 'none',
+         ','.join(result.get('client_omega') or []) or 'none', result.get('error') or 'none'))
+    for name, signature in sorted((result.get('distributor_signatures') or {}).items()):
+        out('distributor.%s signature=%s' % (name, signature))
+
+
 @sims4.commands.Command('kermp.sims', command_type=sims4.commands.CommandType.Live)
 def kermp_sims(_connection=None):
     sims = enumerate_sims()
     bridge.emit('sims.state', {'sims': sims})
     out = _out(_connection)
     for sim in sims:
-        out('sim_id=%s name=%s controlled_by=%s' %
-            (sim['sim_id'], sim['name'], sim.get('controlled_by') or 'none'))
+        out('sim_id=%s name=%s controllers=%s' %
+            (sim['sim_id'], sim['name'], ','.join(sim.get('controllers') or []) or 'none'))
     if not sims:
         out('no loaded Sims found')
 
@@ -54,6 +84,29 @@ def kermp_interact(sim_id: str, affordance_id: str, target_id: str = '0', _conne
         'target_id': str(target_id)})
     _out(_connection)('KerMP interaction requested sim=%s affordance=%s target=%s sent=%s' %
                       (sim_id, affordance_id, target_id, ok))
+
+
+@sims4.commands.Command('kermp.objects', command_type=sims4.commands.CommandType.Live)
+def kermp_objects(_connection=None):
+    out = _out(_connection)
+    objects = enumerate_objects()
+    for obj in objects:
+        out('object_id=%s name=%s type=%s' % (obj['object_id'], obj['name'], obj['type']))
+    if not objects:
+        out('no loaded objects found')
+
+
+@sims4.commands.Command('kermp.affordances', command_type=sims4.commands.CommandType.Live)
+def kermp_affordances(object_id: str, _connection=None):
+    out = _out(_connection)
+    try:
+        affordances = enumerate_affordances(object_id)
+        for item in affordances:
+            out('affordance_id=%s name=%s' % (item['affordance_id'], item['name']))
+        if not affordances:
+            out('no exposed affordances found object_id=%s' % object_id)
+    except Exception as exc:
+        out('affordance lookup failed reason=%s' % exc)
 
 
 @sims4.commands.Command('kermp.ping', command_type=sims4.commands.CommandType.Live)
