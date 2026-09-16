@@ -200,6 +200,11 @@ def kermp_build_status(_connection=None):
         (status.get('captured_total'), status.get('suppressed_remote_echo'), status.get('capture_errors')))
 
 
+@sims4.commands.Command('kermp.build.object.status', command_type=sims4.commands.CommandType.Live)
+def kermp_build_object_status(_connection=None):
+    return kermp_build_status(_connection)
+
+
 @sims4.commands.Command('kermp.native.status', command_type=sims4.commands.CommandType.Live)
 def kermp_native_status(_connection=None):
     out = _out(_connection)
