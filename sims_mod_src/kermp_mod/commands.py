@@ -129,6 +129,44 @@ def kermp_travel_request(zone_id: int, _connection=None):
     _out(_connection)('KerMP travel request sent=%s zone=%s' % (ok, zone_id))
 
 
+@sims4.commands.Command('kermp.travel.status', command_type=sims4.commands.CommandType.Live)
+def kermp_travel_status(_connection=None):
+    out = _out(_connection)
+    pending = hooks._pending_travel_txn
+    out('role=%s txn_id=%s epoch=%s phase=%s current_zone=%s target_zone=%s' %
+        (hooks._sidecar_role or 'unknown', pending or 'none', hooks._travel_epoch,
+         'waiting_zone_ready' if pending else 'idle', hooks._current_zone_id(),
+         hooks._travel_api_info.get('zone_id', 'unknown')))
+    out('local_zone_loaded=%s batch_open=%s batch_complete=%s buffered_updates=%s selected_sim_snapshot=%s selected_sim_restored=%s last_error=%s' %
+        (hooks._travel_local_zone_loaded, hooks._travel_buffering,
+         hooks._travel_batch_complete, len(hooks._travel_buffer),
+         hooks._travel_selected_sim_id or 'none', hooks._travel_selected_sim_restored,
+         hooks._travel_last_error or 'none'))
+    out('travel_api_found=%s travel_function_signature=%s' %
+        (bool(hooks._travel_api_info), hooks._travel_api_info.get('signature', 'unknown')))
+
+
+@sims4.commands.Command('kermp.zones', command_type=sims4.commands.CommandType.Live)
+def kermp_zones(_connection=None):
+    out = _out(_connection)
+    found = []
+    try:
+        persistence = services.get_persistence_service()
+        for name in ('zone_proto_buffs', '_zone_proto_buffs', 'zones'):
+            value = getattr(persistence, name, None)
+            if isinstance(value, dict):
+                found = list(value.items())[:40]
+                break
+    except Exception:
+        pass
+    if not found:
+        out('zone_id=%s name=current (persistence enumeration unavailable)' % services.current_zone_id())
+        return
+    for zone_id, proto in found:
+        out('zone_id=%s name=%s world=%s' %
+            (zone_id, getattr(proto, 'name', 'unknown'), getattr(proto, 'world_id', 'unknown')))
+
+
 @sims4.commands.Command('kermp.wall.test', command_type=sims4.commands.CommandType.Live)
 def kermp_wall_test(x1: float, y1: float, x2: float, y2: float, level: int = 0, _connection=None):
     ok = bridge.emit('build.operation', {

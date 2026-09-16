@@ -22,6 +22,7 @@ class HostRuntime:
         self.last_view_update_size = 0
         self.last_view_update_msg_id = None
         self._game_sequence = 0
+        self.travel_batch_open = False
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -51,12 +52,31 @@ class HostRuntime:
                 self.bridge.send(MessageType.ERROR.value, {'reason': 'raw_message_invalid:%s' % exc})
                 return
             self._game_sequence += 1
+            active = self.host.session.travel.current
+            epoch = active.epoch if active and active.phase.value not in ('complete', 'aborted') else None
             payload = {'msg_id': msg_id, 'sequence': self._game_sequence,
                        'payload_b64': base64.b64encode(raw).decode('ascii')}
+            if epoch is not None:
+                payload['epoch'] = epoch
             self.view_updates_sent += 1
             self.last_view_update_size = len(raw)
             self.last_view_update_msg_id = msg_id
             await self.host.broadcast(MessageType.GAME_RAW_MESSAGE, payload)
+            return
+
+        if event.type == MessageType.TRAVEL_VIEW_BATCH.value:
+            epoch = int(event.payload.get('epoch', 0))
+            active = self.host.session.travel.current
+            if not active or active.epoch != epoch:
+                return
+            kind = str(event.payload.get('kind', '')).lower()
+            self.travel_batch_open = kind == 'begin'
+            out = {'txn_id': active.txn_id, 'epoch': epoch, 'kind': kind}
+            if kind == 'begin':
+                self.bridge.send(MessageType.TRAVEL_VIEW_BATCH.value, out)
+            await self.host.broadcast(MessageType.TRAVEL_VIEW_BATCH, out)
+            if kind == 'end':
+                self.bridge.send(MessageType.TRAVEL_VIEW_BATCH.value, out)
             return
 
         if event.type == MessageType.SIM_SELECT.value:
@@ -90,6 +110,14 @@ class HostRuntime:
 
         if event.type == MessageType.TRAVEL_ZONE_READY.value:
             await self._travel_zone_ready(self.host.player_id, event.payload)
+            return
+        if event.type == MessageType.TRAVEL_ABORT.value:
+            txn = self.host.session.travel.current
+            if txn and int(event.payload.get('epoch', -1)) == txn.epoch:
+                self.host.session.travel.abort(txn.txn_id)
+                await self.host.broadcast(MessageType.TRAVEL_ABORT, {
+                    'txn_id': txn.txn_id, 'epoch': txn.epoch,
+                    'reason': event.payload.get('reason', 'game_abort')})
             return
 
         if event.type == MessageType.BUILD_OPERATION.value:
@@ -138,6 +166,13 @@ class HostRuntime:
             await self._travel_ready(env.sender_id, env.payload)
         elif env.type == MessageType.TRAVEL_ZONE_READY.value:
             await self._travel_zone_ready(env.sender_id, env.payload)
+        elif env.type == MessageType.TRAVEL_ABORT.value:
+            txn = self.host.session.travel.current
+            if txn and int(env.payload.get('epoch', -1)) == txn.epoch:
+                self.host.session.travel.abort(txn.txn_id)
+                await self.host.broadcast(MessageType.TRAVEL_ABORT, {
+                    'txn_id': txn.txn_id, 'epoch': txn.epoch,
+                    'reason': env.payload.get('reason', 'participant_abort')})
         elif env.type == MessageType.BUILD_APPLY.value:
             self.bridge.send(MessageType.BUILD_APPLY.value, env.payload)
         elif env.type in (MessageType.SIM_SELECTION_STATE.value, MessageType.SIM_STATE.value):
@@ -157,6 +192,7 @@ class HostRuntime:
         txn = self.host.session.travel.propose(zone_id, actor_ids, participants)
         out = {
             "txn_id": txn.txn_id,
+            "epoch": txn.epoch,
             "zone_id": txn.zone_id,
             "actor_ids": txn.actor_ids,
             "requested_by": requested_by,
@@ -169,13 +205,15 @@ class HostRuntime:
         if not txn_id:
             return
         try:
-            commit = self.host.session.travel.mark_ready(player_id, txn_id)
+            commit = self.host.session.travel.mark_ready(player_id, txn_id, int(payload.get('epoch', -1)))
         except KeyError:
             return
         if commit:
             txn = self.host.session.travel.current
             assert txn is not None
-            out = {"txn_id": txn.txn_id, "zone_id": txn.zone_id, "actor_ids": txn.actor_ids}
+            out = {"txn_id": txn.txn_id, "epoch": txn.epoch, "zone_id": txn.zone_id, "actor_ids": txn.actor_ids}
+            await self.host.broadcast(MessageType.TRAVEL_VIEW_BATCH, {'txn_id': txn.txn_id, 'epoch': txn.epoch, 'kind': 'begin'})
+            self.bridge.send(MessageType.TRAVEL_VIEW_BATCH.value, {'txn_id': txn.txn_id, 'epoch': txn.epoch, 'kind': 'begin'})
             self.bridge.send(MessageType.TRAVEL_COMMIT.value, out)
             await self.host.broadcast(MessageType.TRAVEL_COMMIT, out)
             self.host.session.travel.begin_zone_wait(txn_id)
@@ -185,11 +223,14 @@ class HostRuntime:
         if not txn_id:
             return
         try:
-            resume = self.host.session.travel.mark_zone_ready(player_id, txn_id)
+            expected = self.host.session.travel.current
+            if expected is None or int(payload.get('epoch', -1)) != expected.epoch:
+                return
+            resume = self.host.session.travel.mark_zone_ready(player_id, txn_id, int(payload.get('epoch', -1)))
         except KeyError:
             return
         if resume:
-            out = {"txn_id": txn_id}
+            out = {"txn_id": txn_id, "epoch": expected.epoch}
             self.bridge.send(MessageType.TRAVEL_RESUME.value, out)
             await self.host.broadcast(MessageType.TRAVEL_RESUME, out)
 
@@ -212,6 +253,8 @@ class ClientRuntime:
         self.buffer_view_updates = False
         self.buffered_view_updates = []
         self.max_buffered_view_updates = 256
+        self.travel_batch_complete = False
+        self.local_zone_loaded = False
 
     async def start(self) -> Envelope:
         self.loop = asyncio.get_running_loop()
@@ -270,6 +313,9 @@ class ClientRuntime:
                 self.bridge.send('sidecar.error', {'reason': 'raw_message_invalid:%s' % exc})
                 return
             epoch = env.payload.get('epoch')
+            if self.travel_epoch and epoch is None:
+                self.bridge.send('sidecar.error', {'reason': 'missing_travel_epoch'})
+                return
             if epoch is not None and self.travel_epoch and int(epoch) != self.travel_epoch:
                 self.bridge.send('sidecar.error', {'reason': 'stale_travel_epoch'})
                 return
@@ -283,16 +329,38 @@ class ClientRuntime:
             else:
                 self._apply_game_message(env.payload)
             return
+        if env.type == MessageType.TRAVEL_VIEW_BATCH.value:
+            epoch = int(env.payload.get('epoch', -1))
+            if epoch != self.travel_epoch:
+                self.bridge.send('sidecar.error', {'reason': 'stale_travel_epoch'})
+                return
+            kind = str(env.payload.get('kind', '')).lower()
+            if kind == 'begin':
+                self.buffer_view_updates = True
+                self.travel_batch_complete = False
+                self.buffered_view_updates = []
+            elif kind == 'end':
+                self.travel_batch_complete = True
+                if self.local_zone_loaded:
+                    self._finish_local_travel(env.payload)
+            self.bridge.send(env.type, env.payload)
+            return
         if env.type == MessageType.TRAVEL_PROPOSE.value:
-            self.travel_epoch = int(env.payload.get('epoch', self.travel_epoch + 1))
+            incoming = int(env.payload.get('epoch', 0))
+            if incoming <= self.travel_epoch:
+                return
+            self.travel_epoch = incoming
+            self.local_zone_loaded = False
+            self.travel_batch_complete = False
             self.buffer_view_updates = True
             self.buffered_view_updates = []
             self.bridge.send("travel.prepare", env.payload)
         elif env.type == MessageType.TRAVEL_RESUME.value:
-            for payload in sorted(self.buffered_view_updates, key=lambda item: int(item.get('sequence', 0))):
-                self._apply_game_message(payload)
-            self.buffered_view_updates = []
-            self.buffer_view_updates = False
+            if int(env.payload.get('epoch', -1)) == self.travel_epoch and self.travel_batch_complete:
+                for payload in sorted(self.buffered_view_updates, key=lambda item: int(item.get('sequence', 0))):
+                    self._apply_game_message(payload)
+                self.buffered_view_updates = []
+                self.buffer_view_updates = False
             self.bridge.send(env.type, env.payload)
         elif env.type in (MessageType.TRAVEL_COMMIT.value, MessageType.TRAVEL_ABORT.value):
             self.bridge.send(env.type, env.payload)
@@ -317,3 +385,16 @@ class ClientRuntime:
         self.last_view_update_size = len(base64.b64decode(str(payload['payload_b64'])))
         self.last_view_update_msg_id = int(payload['msg_id'])
         self.bridge.send(MessageType.GAME_RAW_MESSAGE.value, payload)
+
+    def mark_local_zone_loaded(self, epoch: int) -> bool:
+        if int(epoch) != self.travel_epoch:
+            return False
+        self.local_zone_loaded = True
+        return self.travel_batch_complete and self._finish_local_travel({'epoch': epoch})
+
+    def _finish_local_travel(self, payload: dict) -> bool:
+        for item in sorted(self.buffered_view_updates, key=lambda item: int(item.get('sequence', 0))):
+            self._apply_game_message(item)
+        self.buffered_view_updates = []
+        self.buffer_view_updates = False
+        return True

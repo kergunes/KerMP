@@ -51,3 +51,43 @@ def test_client_preserves_sequence_and_buffers_by_epoch():
         assert runtime.view_updates_received == 1
         assert any('stale_travel_epoch' in str(x) for x in sent)
     asyncio.run(run())
+
+
+def test_client_view_batch_requires_end_and_preserves_order():
+    async def run():
+        client = KerMPClient('c', 'Client', '127.0.0.1')
+        runtime = ClientRuntime(client, bridge_port=0)
+        sent = []
+        runtime.bridge.send = lambda typ, payload: sent.append((typ, payload)) or True
+        from kermp.protocol import Envelope
+        raw = base64.b64encode(b'a').decode('ascii')
+        begin = Envelope.make(MessageType.TRAVEL_VIEW_BATCH,
+                               {'epoch': 3, 'kind': 'begin'}, 'h')
+        await runtime._on_network_message(Envelope.make(MessageType.TRAVEL_PROPOSE,
+                                                         {'epoch': 3, 'txn_id': 't'}, 'h'))
+        await runtime._on_network_message(begin)
+        for seq in (1, 2):
+            await runtime._on_network_message(Envelope.make(MessageType.GAME_RAW_MESSAGE,
+                {'msg_id': seq, 'sequence': seq, 'epoch': 3, 'payload_b64': raw}, 'h', seq=seq))
+        assert runtime.buffered_view_updates[0]['sequence'] == 1
+        assert runtime.buffer_view_updates
+        runtime.local_zone_loaded = True
+        await runtime._on_network_message(Envelope.make(MessageType.TRAVEL_VIEW_BATCH,
+                                                         {'epoch': 3, 'kind': 'end'}, 'h'))
+        assert not runtime.buffer_view_updates
+        assert runtime.view_updates_received == 2
+    asyncio.run(run())
+
+
+def test_client_does_not_accept_stale_batch_epoch():
+    async def run():
+        runtime = ClientRuntime(KerMPClient('c', 'Client', '127.0.0.1'), bridge_port=0)
+        sent = []
+        runtime.bridge.send = lambda typ, payload: sent.append((typ, payload)) or True
+        from kermp.protocol import Envelope
+        await runtime._on_network_message(Envelope.make(MessageType.TRAVEL_PROPOSE,
+                                                         {'epoch': 4, 'txn_id': 't'}, 'h'))
+        await runtime._on_network_message(Envelope.make(MessageType.TRAVEL_VIEW_BATCH,
+                                                         {'epoch': 3, 'kind': 'begin'}, 'h'))
+        assert any('stale_travel_epoch' in str(item) for item in sent)
+    asyncio.run(run())

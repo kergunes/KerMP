@@ -54,8 +54,10 @@ class TravelCoordinator:
         )
         return self.current
 
-    def mark_ready(self, player_id: str, txn_id: str) -> bool:
+    def mark_ready(self, player_id: str, txn_id: str, epoch: Optional[int] = None) -> bool:
         t = self._get(txn_id)
+        if epoch is not None and int(epoch) != t.epoch:
+            return False
         if t.phase != TravelPhase.WAITING_READY:
             return False
         if player_id in t.participants:
@@ -71,8 +73,10 @@ class TravelCoordinator:
             raise RuntimeError("cannot wait for zone before commit")
         t.phase = TravelPhase.WAITING_ZONE_READY
 
-    def mark_zone_ready(self, player_id: str, txn_id: str) -> bool:
+    def mark_zone_ready(self, player_id: str, txn_id: str, epoch: Optional[int] = None) -> bool:
         t = self._get(txn_id)
+        if epoch is not None and int(epoch) != t.epoch:
+            return False
         if t.phase not in {TravelPhase.COMMITTED, TravelPhase.WAITING_ZONE_READY}:
             return False
         t.phase = TravelPhase.WAITING_ZONE_READY

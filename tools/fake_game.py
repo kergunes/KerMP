@@ -18,10 +18,10 @@ def reader(sock):
         msg = json.loads(line.decode("utf-8"))
         print("[SIDECAR]", msg)
         if msg.get("type") == "travel.prepare":
-            send(sock, "travel.ready", {"txn_id": msg["payload"]["txn_id"]})
+            send(sock, "travel.ready", {"txn_id": msg["payload"]["txn_id"], "epoch": msg["payload"].get("epoch", 0)})
         elif msg.get("type") == "travel.commit":
             print("Pretending target zone loaded...")
-            send(sock, "travel.zone_ready", {"txn_id": msg["payload"]["txn_id"], "zone_id": msg["payload"]["zone_id"]})
+            send(sock, "travel.zone_ready", {"txn_id": msg["payload"]["txn_id"], "epoch": msg["payload"].get("epoch", 0), "zone_id": msg["payload"]["zone_id"]})
 
 
 def main():

@@ -12,6 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / 'kermp_mod'
 OUT = ROOT / 'KerMP.ts4script'
+INSTALL_DIR = Path(r'C:\Users\kerem\Documents\Electronic Arts\The Sims 4\Mods\KerMP')
+INSTALL_OUT = INSTALL_DIR / OUT.name
 
 
 def is_py37(exe):
@@ -71,7 +73,10 @@ def main():
         with zipfile.ZipFile(str(OUT), 'w', zipfile.ZIP_DEFLATED) as z:
             for src, arc in files:
                 z.write(str(src), arc)
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(OUT), str(INSTALL_OUT))
     print('Built %s' % OUT)
+    print('Installed %s' % INSTALL_OUT)
 
 
 if __name__ == '__main__':

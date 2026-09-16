@@ -29,6 +29,14 @@ _last_view_update_size = 0
 _last_view_update_msg_id = None
 _game_message_capture_installed = False
 _MAX_RAW_GAME_MESSAGE_BYTES = 2 * 1024 * 1024
+_travel_selected_sim_id = None
+_travel_batch_complete = False
+_travel_native_bypass = False
+_travel_api_info = {}
+_travel_zone_reported = False
+_travel_local_zone_loaded = False
+_travel_selected_sim_restored = False
+_travel_last_error = None
 
 
 def _log(message):
@@ -47,6 +55,8 @@ def install():
     _installed = True
     bridge.on('travel.prepare', _travel_prepare)
     bridge.on('travel.commit', _travel_commit)
+    bridge.on('travel.view_batch', _travel_view_batch)
+    bridge.on('travel.abort', _travel_abort)
     bridge.on('travel.resume', _travel_resume)
     bridge.on('build.apply', _build_apply)
     bridge.on('sidecar.welcome', _sidecar_welcome)
@@ -59,6 +69,7 @@ def install():
     _install_wall_contour_callback()
     _install_zone_hooks()
     _install_game_message_capture()
+    _install_travel_hook()
     _log('KerMP installed')
 
 
@@ -434,29 +445,225 @@ def _interaction_request(payload):
 
 
 def _travel_prepare(payload):
-    global _pending_travel_txn
+    global _pending_travel_txn, _travel_epoch, _travel_selected_sim_id, _travel_zone_reported
     _pending_travel_txn = payload.get('txn_id')
+    _travel_epoch = int(payload.get('epoch', 0))
+    _travel_selected_sim_id = _active_sim_id()
+    _travel_zone_reported = False
     if _sidecar_role == 'client':
-        begin_travel_buffer(payload.get('epoch', 0))
+        begin_travel_buffer(_travel_epoch)
     # v0.0.1 is immediately ready after storing local state. Selected-Sim/camera
     # snapshots are added once the travel call itself is bound.
-    bridge.emit('travel.ready', {'txn_id': _pending_travel_txn})
+    bridge.emit('travel.ready', {'txn_id': _pending_travel_txn, 'epoch': _travel_epoch})
 
 
 def _travel_commit(payload):
-    global _pending_travel_txn
+    global _pending_travel_txn, _travel_epoch, _travel_batch_complete, _travel_zone_reported, _travel_api_info, _travel_last_error
     _pending_travel_txn = payload.get('txn_id')
+    _travel_epoch = int(payload.get('epoch', _travel_epoch))
+    _travel_batch_complete = False
+    _travel_zone_reported = False
+    _travel_api_info = {'zone_id': str(payload.get('zone_id')), 'signature': 'unknown'}
+    _travel_last_error = None
     if _sidecar_role == 'client':
-        begin_travel_buffer(payload.get('epoch', 0))
-    # TODO HARD SPIKE: call the game's travel service for payload['zone_id'].
-    # Do not fake zone_ready here: the zone-load hook below must emit it only
-    # after the destination has actually loaded.
-    _log('Travel commit received for zone=%s' % payload.get('zone_id'))
+        begin_travel_buffer(_travel_epoch)
+    try:
+        if _sidecar_role == 'host' or _sidecar_role == 'client':
+            result = _invoke_native_travel(payload)
+            _log('KERMP TRAVEL NATIVE INVOKED zone=%s api=%s result=%s' %
+                 (payload.get('zone_id'), _travel_api_info.get('signature'), repr(result)[:200]))
+    except Exception as exc:
+        _travel_last_error = '%s: %s' % (type(exc).__name__, exc)
+        _log('KERMP TRAVEL NATIVE ERROR %s: %s' % (type(exc).__name__, exc))
+        bridge.emit('travel.abort', {'txn_id': _pending_travel_txn, 'epoch': _travel_epoch,
+                                     'reason': '%s: %s' % (type(exc).__name__, exc)})
+
+
+def _travel_view_batch(payload):
+    global _travel_batch_complete
+    if int(payload.get('epoch', -1)) != _travel_epoch:
+        return
+    kind = str(payload.get('kind', '')).lower()
+    if kind == 'begin':
+        _travel_batch_complete = False
+        if _sidecar_role == 'client':
+            begin_travel_buffer(_travel_epoch)
+    elif kind == 'end':
+        _travel_batch_complete = True
+        if _sidecar_role == 'client' and _zone_is_loaded(payload.get('zone_id')):
+            _finish_zone_hydration()
+
+
+def _travel_abort(payload):
+    global _pending_travel_txn, _travel_last_error
+    _travel_last_error = str(payload.get('reason') or 'travel_aborted')
+    _pending_travel_txn = None
+
+
+def _active_sim_id():
+    try:
+        import services
+        client = services.get_first_client()
+        info = getattr(client, 'active_sim_info', None) if client else None
+        return str(getattr(info, 'id', '')) if info else None
+    except Exception:
+        return None
+
+
+def _zone_is_loaded(zone_id=None):
+    try:
+        import services
+        current = str(services.current_zone_id())
+        return not zone_id or current == str(zone_id)
+    except Exception:
+        return False
+
+
+def _restore_active_sim():
+    if not _travel_selected_sim_id:
+        return False
+    try:
+        import services
+        client = services.get_first_client()
+        setter = getattr(client, 'set_active_sim_by_id', None) if client else None
+        if callable(setter):
+            setter(int(_travel_selected_sim_id))
+            return True
+        info = services.sim_info_manager().get(int(_travel_selected_sim_id))
+        sim = info.get_sim_instance(allow_hidden_flags=True) if info else None
+        if sim is not None and client is not None:
+            setter = getattr(client, 'set_active_sim', None)
+            if callable(setter):
+                setter(sim)
+                return True
+    except Exception as exc:
+        _log('KERMP selected Sim restore deferred/error: %s' % exc)
+    return False
+
+
+def _finish_zone_hydration():
+    global _travel_zone_reported, _travel_selected_sim_restored
+    if _travel_zone_reported:
+        return True
+    restored = _restore_active_sim()
+    _travel_selected_sim_restored = restored
+    bridge.emit('travel.zone_ready', {'txn_id': _pending_travel_txn, 'epoch': _travel_epoch,
+                                      'zone_id': str(_current_zone_id()), 'selected_sim_restored': restored})
+    _travel_zone_reported = True
+    return True
+
+
+def _current_zone_id():
+    try:
+        import services
+        return services.current_zone_id()
+    except Exception:
+        return 0
+
+
+def _invoke_native_travel(payload):
+    """Call the installed build's travel command using discovered parameter names."""
+    global _travel_api_info, _travel_native_bypass
+    import inspect
+    import world.travel_commands as travel_commands
+    fn = getattr(travel_commands, 'travel_sims_to_zone', None)
+    if not callable(fn):
+        raise RuntimeError('travel_sims_to_zone_not_found')
+    _travel_api_info = {'module': 'world.travel_commands', 'signature': 'uninspectable'}
+    try:
+        _travel_api_info['signature'] = str(inspect.signature(fn))
+    except Exception:
+        pass
+    zone_id = int(str(payload.get('zone_id')))
+    actor_ids = [int(str(x)) for x in payload.get('actor_ids') or []]
+    if not actor_ids:
+        try:
+            import services
+            active = getattr(services.get_first_client(), 'active_sim_info', None)
+            if active:
+                actor_ids = [int(active.id)]
+        except Exception:
+            pass
+    try:
+        import services
+        persistence = services.get_persistence_service()
+        if persistence is not None and hasattr(persistence, 'get_zone_proto_buff'):
+            if persistence.get_zone_proto_buff(zone_id) is None:
+                raise ValueError('destination_zone_not_found')
+    except AttributeError:
+        pass
+    if not actor_ids:
+        raise ValueError('travel_actor_not_found')
+    sig = inspect.signature(fn)
+    kwargs = {}
+    for name, param in sig.parameters.items():
+        lower = name.lower()
+        if 'zone' in lower and ('id' in lower or lower == 'zone'):
+            kwargs[name] = zone_id
+        elif 'sim' in lower and ('id' in lower or 'ids' in lower):
+            kwargs[name] = actor_ids if lower.endswith('ids') or 'ids' in lower else actor_ids[0]
+    missing = [n for n, p in sig.parameters.items()
+               if p.default is inspect.Parameter.empty and n not in kwargs and
+               n not in ('self', 'connection', '_connection')]
+    if missing:
+        raise RuntimeError('travel_signature_requires_unmapped=%s signature=%s' % (missing, sig))
+    _travel_native_bypass = True
+    try:
+        return fn(**kwargs)
+    finally:
+        _travel_native_bypass = False
+
+
+def _install_travel_hook():
+    """Intercept the final native travel command and route it through KerMP."""
+    try:
+        import inspect
+        import world.travel_commands as travel_commands
+        original = getattr(travel_commands, 'travel_sims_to_zone', None)
+        if not callable(original) or getattr(original, '_kermp_wrapped', False):
+            return False
+
+        def wrapped(*args, **kwargs):
+            if _travel_native_bypass:
+                return original(*args, **kwargs)
+            try:
+                bound = inspect.signature(original).bind_partial(*args, **kwargs)
+                values = bound.arguments
+            except Exception:
+                values = kwargs
+            zone = None
+            actors = []
+            for name, value in values.items():
+                lower = name.lower()
+                if 'zone' in lower and ('id' in lower or lower == 'zone'):
+                    zone = value
+                elif 'sim' in lower and ('id' in lower or 'ids' in lower):
+                    actors = list(value) if isinstance(value, (list, tuple, set)) else [value]
+            if zone is None:
+                raise RuntimeError('natural_travel_zone_id_unresolved')
+            payload = {'zone_id': str(getattr(zone, 'zone_id', zone)),
+                       'actor_ids': [str(getattr(x, 'id', x)) for x in actors]}
+            _log('KERMP NATURAL TRAVEL INTERCEPT zone=%s actors=%s' %
+                 (payload['zone_id'], payload['actor_ids']))
+            bridge.emit('travel.request', payload)
+            return None
+
+        wrapped._kermp_wrapped = True
+        wrapped._kermp_original = original
+        travel_commands.travel_sims_to_zone = wrapped
+        _log('KERMP natural travel hook installed signature=%s' % inspect.signature(original))
+        return True
+    except Exception as exc:
+        _log('KERMP natural travel hook unavailable: %s' % exc)
+        return False
 
 
 def _travel_resume(payload):
-    if _sidecar_role == 'client':
-        flush_travel_buffer()
+    if _sidecar_role == 'client' and int(payload.get('epoch', _travel_epoch)) == _travel_epoch:
+        if not _travel_batch_complete:
+            _log('KERMP travel resume received before authoritative batch END')
+        elif _zone_is_loaded(payload.get('zone_id')):
+            _finish_zone_hydration()
     _log('Travel barrier complete txn=%s' % payload.get('txn_id'))
 
 
@@ -643,7 +850,7 @@ def _install_zone_hooks():
 
 
 def _after_zone_spin_up():
-    global _pending_travel_txn
+    global _pending_travel_txn, _travel_batch_complete, _travel_local_zone_loaded
     if not _pending_travel_txn:
         return
     try:
@@ -651,5 +858,14 @@ def _after_zone_spin_up():
         zone_id = services.current_zone_id()
     except Exception:
         zone_id = 0
-    bridge.emit('travel.zone_ready', {'txn_id': _pending_travel_txn, 'zone_id': str(zone_id)})
-    _pending_travel_txn = None
+    _travel_local_zone_loaded = True
+    if _sidecar_role == 'client':
+        # Local loading is necessary but not sufficient: wait for host END.
+        if _travel_batch_complete:
+            _finish_zone_hydration()
+        return
+    _travel_batch_complete = True
+    bridge.emit('travel.view_batch', {'txn_id': _pending_travel_txn, 'epoch': _travel_epoch,
+                                      'kind': 'end', 'zone_id': str(zone_id)})
+    bridge.emit('travel.zone_ready', {'txn_id': _pending_travel_txn, 'epoch': _travel_epoch,
+                                      'zone_id': str(zone_id)})

@@ -26,6 +26,7 @@ class MessageType(str, Enum):
     TRAVEL_ZONE_READY = "travel.zone_ready"
     TRAVEL_RESUME = "travel.resume"
     TRAVEL_ABORT = "travel.abort"
+    TRAVEL_VIEW_BATCH = "travel.view_batch"
 
     BUILD_LOCK_REQUEST = "build.lock_request"
     BUILD_LOCK_STATE = "build.lock_state"
