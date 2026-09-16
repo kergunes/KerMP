@@ -213,6 +213,33 @@ In-game diagnostics: `kermp.status`, `kermp.ping`, `kermp.travel.request`,
 
 ## Core multiplayer vertical slice
 
+## Single-PC real-Sims testing with fake player
+
+`tools\fake_player.py` is a diagnostic remote LAN player. It controls remote
+input while the real Sims instance remains the host bridge; `fake_game.py` is a
+separate simulated game bridge and should be used for transport-only tests.
+
+Terminal 1:
+
+```powershell
+python -m kermp.cli host --name Host
+```
+
+In the real Sims instance, launch normally and confirm `kermp.status` reports
+`bridge_connected=True`. In Terminal 2:
+
+```powershell
+python tools\fake_player.py 127.0.0.1 --player-id player2 --name Player2
+```
+
+Useful commands are `select <sim_id>`, `interact <affordance_id> [target_id]`,
+`travel <zone_id>`, `status`, `travel-status`, and `raw-status`. Travel remains
+a real host barrier request; add `--auto-travel-ack` only when the fake player
+is intentionally standing in for a participant. Build diagnostics queue behind
+the host build lock (`build-lock`, `move`, `recolor`, `scale`, `sell`, and
+`build-release`). `--accept-save-sync` validates chunks into a temporary
+directory and never writes the Sims saves directory.
+
 The authoritative host now maintains one `active_sim_id` per player. In a live
 zone, run `kermp.sims` in the host Sims instance to enumerate loaded Sims, then
 assign the host with `kermp.sim.select <sim_id>`. A diagnostic remote Player 2
