@@ -1,5 +1,30 @@
 # KerMP fast-start — v0.0.1
 
+## REAL SIMS BUILD TEST
+
+The current Sims-side adapter exposes the diagnostic and replay boundary, but it
+does not claim a wall hook until a tested game callback is supplied.  In-game:
+
+```text
+kermp.status
+kermp.ping
+kermp.build.status
+```
+
+After a real committed wall hook reports `capture_available=True`, draw one
+wall, confirm `KERMP BUILD CAPTURE type=wall.create` in the log, then run:
+
+```text
+kermp.build.replay_last
+```
+
+Replay enters the same `build.apply` adapter and has duplicate/echo suppression.
+`apply_available=False` is an explicit native-boundary blocker, not a visual
+fake-wall success.
+
+Build/Buy enter/exit callbacks are used for the fallback lease UX. They acquire
+on entering Build Mode and release on exit; they do not imply wall capture.
+
 Today's target is intentionally narrow: prove the LAN/session/event architecture before spending time on Sims-native hooks.
 
 ## Implemented now

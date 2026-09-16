@@ -62,6 +62,14 @@ class HostRuntime:
             await self.host.broadcast(MessageType.BUILD_APPLY, payload)
             return
 
+        if event.type == MessageType.BUILD_LOCK_REQUEST.value:
+            granted = self.host.session.build.request_lock(self.host.player_id)
+            payload = {"owner_id": self.host.session.build.lock.owner_id if self.host.session.build.lock else None,
+                       "granted_to": self.host.player_id if granted else None}
+            self.bridge.send(MessageType.BUILD_LOCK_STATE.value, payload)
+            await self.host.broadcast(MessageType.BUILD_LOCK_STATE, payload)
+            return
+
         if event.type == MessageType.BUILD_LOCK_RELEASE.value:
             self.host.session.build.release_lock(self.host.player_id)
             payload = {"owner_id": self.host.session.build.lock.owner_id if self.host.session.build.lock else None}
@@ -164,6 +172,9 @@ class ClientRuntime:
                 await self._flush_build()
             else:
                 await self.client.send(MessageType.BUILD_LOCK_REQUEST)
+            return
+        if event.type == MessageType.BUILD_LOCK_REQUEST.value:
+            await self.client.send(MessageType.BUILD_LOCK_REQUEST)
             return
         if event.type == MessageType.BUILD_LOCK_RELEASE.value:
             self.owns_build_lock = False

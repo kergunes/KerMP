@@ -7,6 +7,7 @@ and the transport contract. The Build/Buy native call remains the hard spike.
 import traceback
 
 from .bridge_client import KerMPBridgeClient
+from .build_adapter import adapter
 
 bridge = KerMPBridgeClient()
 _installed = False
@@ -33,6 +34,7 @@ def install():
     bridge.on('build.apply', _build_apply)
     bridge.on('sidecar.welcome', _sidecar_welcome)
     bridge.start()
+    _install_build_buy_hooks()
     _install_zone_hooks()
     _log('KerMP installed')
 
@@ -63,9 +65,59 @@ def _travel_resume(payload):
 
 
 def _build_apply(payload):
-    # TODO HARD SPIKE: invoke native Build/Buy operation. Keeping this handler
-    # in one place lets us swap native bridge strategies without changing LAN.
-    _log('Build apply seq=%s op=%s' % (payload.get('op_seq'), payload.get('op')))
+    try:
+        applied = adapter.apply_remote(payload)
+        _log('KERMP BUILD APPLY seq=%s op=%s applied=%s suppression=%s' %
+             (payload.get('op_seq'), payload.get('op'), applied,
+              adapter.applying_remote))
+    except Exception:
+        _log('KERMP BUILD APPLY ERROR %s' % traceback.format_exc())
+
+
+def capture_build_operation(payload):
+    """Entry point for a future tested UI/native hook.
+
+    A hook must call this only once the operation is committed.  Returning the
+    normalized operation keeps the game boundary independent from LAN details.
+    """
+    try:
+        operation = adapter.capture_local(payload)
+    except Exception:
+        _log('KERMP BUILD CAPTURE ERROR %s' % traceback.format_exc())
+        return False
+    if not operation:
+        return False
+    _log('KERMP BUILD CAPTURE type=%s data=%s' %
+         (operation['op'], operation['data']))
+    bridge.emit('build.operation', operation)
+    return True
+
+
+def _on_build_buy_enter():
+    _log('KERMP BUILD MODE ENTER')
+    bridge.emit('build.lock_request', {})
+
+
+def _on_build_buy_exit():
+    _log('KERMP BUILD MODE EXIT')
+    bridge.emit('build.lock_release', {})
+
+
+def _install_build_buy_hooks():
+    """Use the verified Build/Buy lifecycle callbacks for lease fallback.
+
+    These callbacks are not wall-operation capture: the installed game exposes
+    them as zero-argument enter/exit notifications only.
+    """
+    try:
+        import build_buy
+        register_enter = getattr(build_buy, 'register_build_buy_enter_callback')
+        register_exit = getattr(build_buy, 'register_build_buy_exit_callback')
+        register_enter(_on_build_buy_enter)
+        register_exit(_on_build_buy_exit)
+        _log('KERMP Build/Buy lifecycle hooks installed')
+    except Exception:
+        _log('KERMP Build/Buy lifecycle hooks unavailable')
 
 
 def _install_zone_hooks():

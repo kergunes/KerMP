@@ -4,6 +4,7 @@ import sims4.commands
 import services
 
 from .hooks import bridge
+from .build_adapter import adapter, build_buy_surface
 
 
 def _out(connection):
@@ -39,3 +40,22 @@ def kermp_wall_test(x1: float, y1: float, x2: float, y2: float, level: int = 0, 
         'data': {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'level': level},
     })
     _out(_connection)('KerMP synthetic wall event sent=%s' % ok)
+
+
+@sims4.commands.Command('kermp.build.status', command_type=sims4.commands.CommandType.Live)
+def kermp_build_status(_connection=None):
+    out = _out(_connection)
+    out('capture_available=%s apply_available=%s suppression_active=%s' %
+        ('capture' in adapter.capabilities(), 'apply' in adapter.capabilities(),
+         adapter.applying_remote))
+    out('last_local_operation=%s' % adapter.last_local_operation)
+    out('last_remote_operation=%s' % adapter.last_remote_operation)
+    surface = build_buy_surface()
+    out('build_buy_module=%s candidates=%s' %
+        (surface['module_available'], ','.join(surface['candidates'])))
+
+
+@sims4.commands.Command('kermp.build.replay_last', command_type=sims4.commands.CommandType.Live)
+def kermp_build_replay_last(_connection=None):
+    ok = adapter.replay_last()
+    _out(_connection)('KerMP remote build replay applied=%s' % ok)
