@@ -192,12 +192,38 @@ def kermp_build_status(_connection=None):
     event = wall_event_probe()
     out('wall_callback_available=%s registered=%s events=%s' %
         (event['attribute_exists'], event['registered'], event['event_count']))
-    out('object_hooks=%s' % hooks.build_object_status().get('hooks'))
-    out('operation_counts=%s last_error=%s' %
-        (adapter.status().get('operation_counts'), adapter.status().get('last_error') or 'none'))
+    object_status = hooks.build_object_status()
+    hook_map = object_status.get('hooks') or {}
+    for name in ('move_hook', 'create_hook', 'destroy_hook', 'definition_hook',
+                 'scale_hook', 'funds_hook', 'parent_hook', 'clear_parent_hook'):
+        item = hook_map.get(name) or {}
+        out('%s available=%s installed=%s signature=%s' %
+            (name, item.get('available', False), item.get('installed', False),
+             item.get('signature') or 'unavailable'))
     status = adapter.status()
+    counts = status.get('operation_counts') or {}
+    for name in ('object.move', 'object.definition', 'object.destroy', 'object.create',
+                 'object.scale', 'object.set_parent', 'object.clear_parent', 'funds.modify'):
+        out('%s=%s' % (name, counts.get(name, 0)))
     out('captured_total=%s suppressed_remote_echo=%s capture_errors=%s' %
         (status.get('captured_total'), status.get('suppressed_remote_echo'), status.get('capture_errors')))
+    local = status.get('last_local_operation') or {}
+    remote = status.get('last_remote_operation') or {}
+    out('last_local_type=%s last_local_object_id=%s last_local_op_id=%s' %
+        (local.get('op', 'none'), (local.get('data') or {}).get('object_id', 'none'), local.get('op_id', 'none')))
+    out('last_remote_type=%s last_error=%s' %
+        (remote.get('op', 'none'), status.get('last_error') or 'none'))
+
+
+@sims4.commands.Command('kermp.build.object.status', command_type=sims4.commands.CommandType.Live)
+def kermp_build_object_status(_connection=None):
+    return kermp_build_status(_connection)
+
+
+@sims4.commands.Command('kermp.build.object.reset', command_type=sims4.commands.CommandType.Live)
+def kermp_build_object_reset(_connection=None):
+    adapter.reset_diagnostics()
+    _out(_connection)('KerMP Build/Buy diagnostics reset')
 
 
 @sims4.commands.Command('kermp.build.object.status', command_type=sims4.commands.CommandType.Live)

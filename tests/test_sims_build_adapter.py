@@ -9,6 +9,7 @@ _spec.loader.exec_module(_module)
 SimsBuildAdapter = _module.SimsBuildAdapter
 normalize_operation = _module.normalize_operation
 contour_delta = _module.contour_delta
+bind_call = _module.bind_call
 
 
 def test_normalize_captured_wall_operation():
@@ -78,6 +79,26 @@ def test_capture_counters_ids_and_duplicate_definition_filter():
     adapter.applying_remote = True
     assert adapter.capture_local({"op": "object.scale", "data": {"object_id": 7, "scale": 1.0}}) is False
     assert adapter.suppressed_remote_echo == 1
+
+
+def test_bind_call_handles_verified_sims_names_positionally_and_by_keyword():
+    def create(zone_id, def_id, obj_id, obj_state=None, loc_type=None, content_source=None):
+        return True
+
+    names = ('zone_id', 'def_id', 'obj_id', 'obj_state', 'loc_type', 'content_source')
+    positional = bind_call(create, (1, 2, 3, 'state', 4, 5), {}, names)
+    keyword = bind_call(create, (), {'zone_id': 1, 'def_id': 2, 'obj_id': 3,
+                                    'obj_state': 'state', 'loc_type': 4, 'content_source': 5}, names)
+    assert positional == keyword
+    assert positional['def_id'] == 2 and positional['obj_id'] == 3
+
+
+def test_bind_call_fallback_preserves_verified_keyword_names():
+    class NativeLike:
+        pass
+    original = NativeLike()
+    values = bind_call(original, (1, 2), {'obj_id': 3}, ('zone_id', 'def_id', 'obj_id'))
+    assert values == {'zone_id': 1, 'def_id': 2, 'obj_id': 3}
 
 
 def test_contour_delta_reports_added_and_removed_normalized_values():

@@ -9,6 +9,22 @@ import json
 import inspect
 
 
+def bind_call(original, args, kwargs, positional_names):
+    """Bind a Sims call using its real signature, with a verified fallback."""
+    try:
+        bound = inspect.signature(original).bind_partial(*args, **kwargs)
+        result = dict(bound.arguments)
+        if 'args' in result:
+            result.update(dict(zip(positional_names, result.pop('args'))))
+        if 'kwargs' in result:
+            result.update(result.pop('kwargs'))
+        return result
+    except Exception:
+        result = dict(zip(positional_names, args))
+        result.update(kwargs)
+        return result
+
+
 OBJECT_OPERATIONS = (
     'object.create', 'object.destroy', 'object.move', 'object.definition',
     'object.scale', 'object.set_parent', 'object.clear_parent', 'funds.modify',
@@ -162,6 +178,18 @@ class SimsBuildAdapter(object):
     def configure(self, capture=None, apply=None):
         self._capture = capture
         self._apply = apply
+
+    def reset_diagnostics(self):
+        self.operation_counts = {}
+        self.captured_total = 0
+        self.suppressed_remote_echo = 0
+        self.capture_errors = 0
+        self.last_capture = None
+        self.last_capture_error = None
+        self.last_local_operation = None
+        self.last_error = None
+        self._last_definition = {}
+        self._capture_sequence = 0
 
     def capabilities(self):
         result = set()

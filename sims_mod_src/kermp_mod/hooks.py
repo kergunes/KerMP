@@ -9,7 +9,7 @@ import functools
 import traceback
 
 from .bridge_client import KerMPBridgeClient
-from .build_adapter import adapter
+from .build_adapter import adapter, bind_call
 
 bridge = KerMPBridgeClient()
 _installed = False
@@ -40,6 +40,7 @@ _travel_selected_sim_restored = False
 _travel_last_error = None
 _build_hook_info = {}
 _build_last_error = None
+_build_capture_depth = 0
 
 
 def _log(message):
@@ -734,6 +735,8 @@ def capture_build_operation(payload):
 
 def capture_object_build_operation(op, data):
     """Common natural Build/Buy capture boundary for all object wrappers."""
+    if _build_capture_depth:
+        return False
     payload = {'op': op, 'data': data}
     try:
         operation = adapter.capture_local(payload)
@@ -964,12 +967,12 @@ def _install_wrapper(label, factory):
 def _wrap_move(original):
     def wrapped(*args, **kwargs):
         result = original(*args, **kwargs)
-        values = dict(zip(('zone_id', 'object_id', 'routing_surface', 'transform',
-                           'parent_id', 'parent_type_info', 'slot_hash'), args))
-        values.update(kwargs)
+        values = bind_call(original, args, kwargs,
+                           ('zone_id', 'obj_id', 'routing_surface', 'transform',
+                            'parent_id', 'parent_type_info', 'slot_hash'))
         capture_object_build_operation('object.move', {
             'zone_id': values.get('zone_id'),
-            'object_id': values.get('object_id'),
+            'object_id': values.get('obj_id', values.get('object_id')),
             'routing_surface': _json_value(values.get('routing_surface')),
             'transform': _serialize_transform(values.get('transform')),
             'parent_id': values.get('parent_id'),
@@ -983,8 +986,7 @@ def _wrap_move(original):
 def _wrap_funds(original):
     def wrapped(*args, **kwargs):
         result = original(*args, **kwargs)
-        values = dict(zip(('amount', 'household_id', 'reason', 'zone_id'), args))
-        values.update(kwargs)
+        values = bind_call(original, args, kwargs, ('amount', 'household_id', 'reason', 'zone_id'))
         capture_object_build_operation('funds.modify', {
             'amount': values.get('amount'), 'household_id': values.get('household_id'),
             'reason': values.get('reason'), 'zone_id': values.get('zone_id'),
@@ -996,16 +998,16 @@ def _wrap_funds(original):
 def _wrap_create(original):
     def wrapped(*args, **kwargs):
         result = original(*args, **kwargs)
-        values = dict(zip(('zone_id', 'definition_id', 'object_id', 'object_state',
-                           'location_type', 'content_source'), args))
-        values.update(kwargs)
+        values = bind_call(original, args, kwargs,
+                           ('zone_id', 'def_id', 'obj_id', 'obj_state', 'loc_type', 'content_source'))
         obj = result if hasattr(result, 'id') else None
-        object_id = values.get('object_id') if values.get('object_id') is not None else getattr(obj, 'id', None)
+        object_id = values.get('obj_id', values.get('object_id'))
+        object_id = object_id if object_id is not None else getattr(obj, 'id', None)
         capture_object_build_operation('object.create', {
             'zone_id': values.get('zone_id'), 'object_id': object_id,
-            'definition_id': values.get('definition_id'),
-            'object_state': _json_value(values.get('object_state')),
-            'location_type': _json_value(values.get('location_type')),
+            'definition_id': values.get('def_id', values.get('definition_id')),
+            'object_state': _json_value(values.get('obj_state', values.get('object_state'))),
+            'location_type': _json_value(values.get('loc_type', values.get('location_type'))),
             'content_source': _json_value(values.get('content_source')),
             'transform': _serialize_transform(getattr(obj, 'location', None)),
         })
@@ -1015,9 +1017,8 @@ def _wrap_create(original):
 
 def _wrap_destroy(original):
     def wrapped(*args, **kwargs):
-        values = dict(zip(('zone_id', 'object_or_id'), args))
-        values.update(kwargs)
-        target = values.get('object_or_id')
+        values = bind_call(original, args, kwargs, ('zone_id', 'obj_or_id'))
+        target = values.get('obj_or_id', values.get('object_or_id'))
         object_id = getattr(target, 'id', target)
         result = original(*args, **kwargs)
         capture_object_build_operation('object.destroy', {
@@ -1029,11 +1030,16 @@ def _wrap_destroy(original):
 
 def _wrap_parent(original):
     def wrapped(*args, **kwargs):
-        result = original(*args, **kwargs)
-        values = dict(zip(('object_id', 'parent_id', 'transform', 'joint_name', 'slot_hash', 'zone_id'), args))
-        values.update(kwargs)
+        global _build_capture_depth
+        _build_capture_depth += 1
+        try:
+            result = original(*args, **kwargs)
+        finally:
+            _build_capture_depth -= 1
+        values = bind_call(original, args, kwargs,
+                           ('obj_id', 'parent_id', 'transform', 'joint_name', 'slot_hash', 'zone_id'))
         capture_object_build_operation('object.set_parent', {
-            'object_id': values.get('object_id'), 'parent_id': values.get('parent_id'),
+            'object_id': values.get('obj_id', values.get('object_id')), 'parent_id': values.get('parent_id'),
             'transform': _serialize_transform(values.get('transform')),
             'joint_name': values.get('joint_name'), 'slot_hash': values.get('slot_hash'),
             'zone_id': values.get('zone_id'),
@@ -1044,11 +1050,15 @@ def _wrap_parent(original):
 
 def _wrap_clear_parent(original):
     def wrapped(*args, **kwargs):
-        result = original(*args, **kwargs)
-        values = dict(zip(('object_id', 'transform', 'zone_id', 'surface'), args))
-        values.update(kwargs)
+        global _build_capture_depth
+        _build_capture_depth += 1
+        try:
+            result = original(*args, **kwargs)
+        finally:
+            _build_capture_depth -= 1
+        values = bind_call(original, args, kwargs, ('obj_id', 'transform', 'zone_id', 'surface'))
         capture_object_build_operation('object.clear_parent', {
-            'object_id': values.get('object_id'), 'transform': _serialize_transform(values.get('transform')),
+            'object_id': values.get('obj_id', values.get('object_id')), 'transform': _serialize_transform(values.get('transform')),
             'zone_id': values.get('zone_id'), 'routing_surface': _json_value(values.get('surface')),
         })
         return result
@@ -1100,14 +1110,29 @@ def _json_value(value, depth=0):
 def _serialize_transform(transform):
     if transform is None:
         return None
-    result = {}
-    for name in ('position', 'translation', 'orientation', 'routing_surface'):
-        try:
-            value = getattr(transform, name)
-            result[name] = _json_value(value)
-        except Exception:
-            pass
-    return result or _json_value(transform)
+    position = getattr(transform, 'position', getattr(transform, 'translation', None))
+    orientation = getattr(transform, 'orientation', None)
+    surface = getattr(transform, 'routing_surface', None)
+    result = {
+        'translation': _components(position, 3),
+        'orientation': _components(orientation, 4),
+        'routing_surface': _json_value(surface),
+    }
+    if result['translation'] is None and result['orientation'] is None:
+        return _json_value(transform)
+    return result
+
+
+def _components(value, count):
+    if value is None:
+        return None
+    names = ('x', 'y', 'z', 'w')[:count]
+    try:
+        return [float(getattr(value, name)) for name in names]
+    except Exception:
+        if isinstance(value, (list, tuple)) and len(value) >= count:
+            return [float(item) for item in value[:count]]
+        return None
 
 
 def _deserialize_transform(data, fallback=None):
@@ -1118,9 +1143,14 @@ def _deserialize_transform(data, fallback=None):
         import routing
         position = data.get('position') or data.get('translation')
         orientation = data.get('orientation')
-        if isinstance(position, dict):
+        if isinstance(position, (list, tuple)):
+            position = Vector3(float(position[0]), float(position[1]), float(position[2]))
+        elif isinstance(position, dict):
             position = Vector3(float(position.get('x', 0)), float(position.get('y', 0)), float(position.get('z', 0)))
-        if isinstance(orientation, dict):
+        if isinstance(orientation, (list, tuple)):
+            orientation = Quaternion(float(orientation[0]), float(orientation[1]),
+                                     float(orientation[2]), float(orientation[3]))
+        elif isinstance(orientation, dict):
             orientation = Quaternion(float(orientation.get('x', 0)), float(orientation.get('y', 0)),
                                      float(orientation.get('z', 0)), float(orientation.get('w', 1)))
         surface = data.get('routing_surface')
