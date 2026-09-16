@@ -61,24 +61,32 @@ class LocalGameBridge:
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             srv.bind(("127.0.0.1", self.port))
             srv.listen(1)
+            # Only accept() needs a short timeout so close() can stop the thread.
             srv.settimeout(0.5)
             while not self._stop.is_set():
                 if not self._conn:
                     try:
                         conn, _ = srv.accept()
-                        conn.settimeout(0.5)
+                        # A connected Sims/fake-game bridge is intentionally long-lived.
+                        # Do not inherit the listener polling timeout here: an idle game
+                        # can sit for many seconds/minutes between bridge events.
+                        conn.settimeout(None)
                         self._conn = conn
                     except socket.timeout:
                         continue
+                    except OSError:
+                        if self._stop.is_set():
+                            break
+                        continue
                 try:
                     assert self._conn is not None
-                    buf = self._conn.makefile("rb")
-                    while not self._stop.is_set():
-                        line = buf.readline()
-                        if not line:
-                            break
-                        raw = json.loads(line.decode("utf-8"))
-                        self.on_event(BridgeEvent(raw["type"], raw.get("payload", {})))
+                    with self._conn.makefile("rb") as buf:
+                        while not self._stop.is_set():
+                            line = buf.readline()
+                            if not line:
+                                break
+                            raw = json.loads(line.decode("utf-8"))
+                            self.on_event(BridgeEvent(raw["type"], raw.get("payload", {})))
                 except (OSError, ValueError, json.JSONDecodeError):
                     pass
                 finally:
