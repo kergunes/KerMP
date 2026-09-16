@@ -8,6 +8,7 @@ _module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_module)
 SimsBuildAdapter = _module.SimsBuildAdapter
 normalize_operation = _module.normalize_operation
+contour_delta = _module.contour_delta
 
 
 def test_normalize_captured_wall_operation():
@@ -40,3 +41,20 @@ def test_capture_is_rejected_during_remote_apply():
     adapter.configure(apply=apply)
     assert adapter.apply_remote({"op": "wall.create", "op_seq": 1, "data": {}})
     assert observed == [False]
+
+
+def test_contour_delta_reports_added_and_removed_normalized_values():
+    before = [{'level': 0, 'start': [1, 1], 'end': [2, 1]}]
+    after = before + [{'level': 0, 'start': [2, 1], 'end': [3, 1]}]
+    delta = contour_delta(before, after)
+    assert delta['before_count'] == 1
+    assert delta['after_count'] == 2
+    assert delta['added'] == [after[1]]
+    assert delta['removed'] == []
+
+
+def test_contour_delta_reports_changed_stable_identity():
+    before = [{'wall_id': 9, 'level': 0, 'end': [2, 1]}]
+    after = [{'wall_id': 9, 'level': 1, 'end': [2, 1]}]
+    delta = contour_delta(before, after)
+    assert delta['changed'][0]['identity'] == '9'

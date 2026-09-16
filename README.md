@@ -9,6 +9,7 @@ does not claim a wall hook until a tested game callback is supplied.  In-game:
 kermp.status
 kermp.ping
 kermp.build.status
+kermp.build.probe
 ```
 
 After a real committed wall hook reports `capture_available=True`, draw one
@@ -21,6 +22,11 @@ kermp.build.replay_last
 Replay enters the same `build.apply` adapter and has duplicate/echo suppression.
 `apply_available=False` is an explicit native-boundary blocker, not a visual
 fake-wall success.
+
+For the live contour probe, run `kermp.build.probe`, draw exactly one wall in
+Build Mode, then run `kermp.build.probe` again. The console reports before/after
+counts and added/removed/changed counts; `Documents\Electronic Arts\The Sims 4`
+logs contain the bounded raw representation and delta.
 
 Build/Buy enter/exit callbacks are used for the fallback lease UX. They acquire
 on entering Build Mode and release on exit; they do not imply wall capture.

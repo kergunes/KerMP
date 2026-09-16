@@ -93,6 +93,21 @@ def capture_build_operation(payload):
     return True
 
 
+def probe_wall_contours():
+    result = adapter.probe()
+    snapshot = result['snapshot']
+    _log('KERMP BUILD PROBE phase=%s module=%s callable=%s type=%s signature=%s raw_type=%s raw=%s error=%s' %
+         (result['phase'], snapshot.get('module_available'), snapshot.get('callable'),
+          snapshot.get('type'), snapshot.get('signature'), snapshot.get('raw_type'),
+          snapshot.get('raw_repr'), snapshot.get('error')))
+    if result['phase'] == 'delta':
+        delta = result['delta']
+        _log('KERMP BUILD PROBE DELTA before=%s after=%s added=%s removed=%s changed=%s' %
+             (delta['before_count'], delta['after_count'], delta['added'],
+              delta['removed'], delta['changed']))
+    return result
+
+
 def _on_build_buy_enter():
     _log('KERMP BUILD MODE ENTER')
     bridge.emit('build.lock_request', {})

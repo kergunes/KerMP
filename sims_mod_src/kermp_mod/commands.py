@@ -3,7 +3,7 @@ import json
 import sims4.commands
 import services
 
-from .hooks import bridge
+from .hooks import bridge, probe_wall_contours
 from .build_adapter import adapter, build_buy_surface
 
 
@@ -59,3 +59,20 @@ def kermp_build_status(_connection=None):
 def kermp_build_replay_last(_connection=None):
     ok = adapter.replay_last()
     _out(_connection)('KerMP remote build replay applied=%s' % ok)
+
+
+@sims4.commands.Command('kermp.build.probe', command_type=sims4.commands.CommandType.Live)
+def kermp_build_probe(_connection=None):
+    result = probe_wall_contours()
+    snapshot = result['snapshot']
+    out = _out(_connection)
+    out('KerMP probe phase=%s callable=%s type=%s signature=%s count=%s' %
+        (result['phase'], snapshot.get('callable'), snapshot.get('type'),
+         snapshot.get('signature'), len(snapshot.get('contours') or [])))
+    if result['phase'] == 'baseline':
+        out('Baseline stored. Draw one wall, then run kermp.build.probe again.')
+    else:
+        delta = result['delta']
+        out('before=%s after=%s added=%s removed=%s changed=%s' %
+            (delta['before_count'], delta['after_count'], len(delta['added']),
+             len(delta['removed']), len(delta['changed'])))

@@ -6,6 +6,107 @@ only report/apply through callables explicitly supplied by a tested hook.
 from __future__ import print_function
 
 import json
+import inspect
+
+
+def _json_value(value, depth=0):
+    """Make a bounded, deterministic representation of game return values."""
+    if depth > 5:
+        return '<depth-limit>'
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_value(v, depth + 1)
+                for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_value(v, depth + 1) for v in value]
+    try:
+        attrs = getattr(value, '__dict__', None)
+        if attrs:
+            return {'__type__': type(value).__name__,
+                    'attributes': _json_value(attrs, depth + 1)}
+    except Exception:
+        pass
+    return {'__type__': type(value).__name__, 'repr': repr(value)[:1000]}
+
+
+def contour_delta(before, after):
+    """Compare normalized contour sequences without assuming wall identity."""
+    before = list(before or [])
+    after = list(after or [])
+    before_keys = [json.dumps(item, sort_keys=True, separators=(',', ':'))
+                   for item in before]
+    after_keys = [json.dumps(item, sort_keys=True, separators=(',', ':'))
+                  for item in after]
+    before_counts = {}
+    after_counts = {}
+    for key in before_keys:
+        before_counts[key] = before_counts.get(key, 0) + 1
+    for key in after_keys:
+        after_counts[key] = after_counts.get(key, 0) + 1
+    added = []
+    removed = []
+    for key, count in after_counts.items():
+        for _ in range(max(0, count - before_counts.get(key, 0))):
+            added.append(after[after_keys.index(key)])
+    for key, count in before_counts.items():
+        for _ in range(max(0, count - after_counts.get(key, 0))):
+            removed.append(before[before_keys.index(key)])
+    changed = []
+    identity_keys = ('wall_id', 'wallId', 'id', 'guid', 'uid', 'handle')
+    before_by_id = {}
+    after_by_id = {}
+    for item in before:
+        if isinstance(item, dict):
+            for key in identity_keys:
+                if key in item:
+                    before_by_id[str(item[key])] = item
+                    break
+    for item in after:
+        if isinstance(item, dict):
+            for key in identity_keys:
+                if key in item:
+                    after_by_id[str(item[key])] = item
+                    break
+    for identity in sorted(set(before_by_id) & set(after_by_id)):
+        if before_by_id[identity] != after_by_id[identity]:
+            changed.append({'identity': identity, 'before': before_by_id[identity],
+                            'after': after_by_id[identity]})
+    return {'before_count': len(before), 'after_count': len(after),
+            'added': added, 'removed': removed, 'changed': changed}
+
+
+def _safe_signature(value):
+    try:
+        return str(inspect.signature(value))
+    except Exception as exc:
+        return '<unavailable:%s>' % type(exc).__name__
+
+
+def probe_wall_contours():
+    """Safely call the installed zero-argument wrapper, never with guesses."""
+    result = {'module_available': False, 'callable': False, 'type': None,
+              'repr': None, 'doc': None, 'signature': None, 'error': None,
+              'contours': []}
+    try:
+        import build_buy
+        result['module_available'] = True
+        target = getattr(build_buy, 'get_wall_contours', None)
+        result['callable'] = bool(callable(target))
+        result['type'] = type(target).__name__
+        result['repr'] = repr(target)[:1000]
+        result['doc'] = (getattr(target, '__doc__', None) or '')[:1000]
+        result['signature'] = _safe_signature(target)
+        if result['callable']:
+            # The live wrapper is declared with *args/**kwargs.  Calling it with
+            # no arguments is the only non-destructive invocation we permit.
+            raw = target()
+            result['raw_type'] = type(raw).__name__
+            result['raw_repr'] = repr(raw)[:6000]
+            result['contours'] = [_json_value(item) for item in (raw or [])]
+    except Exception as exc:
+        result['error'] = '%s: %s' % (type(exc).__name__, exc)
+    return result
 
 
 def normalize_operation(payload):
@@ -29,6 +130,7 @@ class SimsBuildAdapter(object):
         self.last_local_operation = None
         self.last_remote_operation = None
         self.applying_remote = False
+        self.probe_before = None
 
     def configure(self, capture=None, apply=None):
         self._capture = capture
@@ -69,6 +171,15 @@ class SimsBuildAdapter(object):
         if not self.last_local_operation:
             return False
         return self.apply_remote(self.last_local_operation)
+
+    def probe(self):
+        current = probe_wall_contours()
+        if self.probe_before is None:
+            self.probe_before = current
+            return {'phase': 'baseline', 'snapshot': current}
+        delta = contour_delta(self.probe_before['contours'], current['contours'])
+        self.probe_before = current
+        return {'phase': 'delta', 'snapshot': current, 'delta': delta}
 
 
 adapter = SimsBuildAdapter()
