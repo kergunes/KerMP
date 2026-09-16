@@ -569,6 +569,12 @@ def _invoke_native_travel(payload):
     fn = getattr(travel_commands, 'travel_sims_to_zone', None)
     if not callable(fn):
         raise RuntimeError('travel_sims_to_zone_not_found')
+    # If KerMP installed the natural-travel wrapper, invoke/introspect the
+    # original Sims command rather than recursively inspecting our *args/**kwargs
+    # wrapper.
+    original = getattr(fn, '_kermp_original', None)
+    if callable(original):
+        fn = original
     _travel_api_info = {'module': 'world.travel_commands', 'signature': 'uninspectable'}
     try:
         _travel_api_info['signature'] = str(inspect.signature(fn))
@@ -604,6 +610,7 @@ def _invoke_native_travel(payload):
             kwargs[name] = actor_ids if lower.endswith('ids') or 'ids' in lower else actor_ids[0]
     missing = [n for n, p in sig.parameters.items()
                if p.default is inspect.Parameter.empty and n not in kwargs and
+               p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) and
                n not in ('self', 'connection', '_connection')]
     if missing:
         raise RuntimeError('travel_signature_requires_unmapped=%s signature=%s' % (missing, sig))
