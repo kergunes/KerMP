@@ -122,24 +122,46 @@ def _object(object_id):
 
 
 def enumerate_affordances(object_id, sim_id=None, limit=40):
-    """Inspect only affordance collections exposed by this installed build."""
+    """Inspect affordance collections exposed by this installed build."""
     obj = _object(object_id)
     candidates = []
-    for attr in ('super_affordances', 'affordances', 'available_affordances'):
-        value = getattr(obj, attr, None)
-        if value is not None:
+    sources = (
+        obj,
+        getattr(obj, 'definition', None),
+        type(obj),
+    )
+    for source in sources:
+        if source is None:
+            continue
+        for attr in ('_super_affordances', 'super_affordances', 'affordances', 'available_affordances'):
+            value = getattr(source, attr, None)
+            if value is None:
+                continue
             try:
-                candidates = list(value)
-                break
+                if callable(value):
+                    value = value()
+                values = list(value)
             except Exception:
-                pass
+                continue
+            if values:
+                candidates = values
+                break
+        if candidates:
+            break
     result = []
-    for affordance in candidates[:int(limit)]:
+    seen = set()
+    for affordance in candidates:
         aid = getattr(affordance, 'guid64', None) or getattr(affordance, 'guid', None) or getattr(affordance, 'id', None)
         if aid is None:
             continue
+        aid = str(aid)
+        if aid in seen:
+            continue
+        seen.add(aid)
         name = getattr(affordance, '__name__', None) or getattr(affordance, 'display_name', None) or type(affordance).__name__
-        result.append({'affordance_id': str(aid), 'name': str(name)})
+        result.append({'affordance_id': aid, 'name': str(name)})
+        if len(result) >= int(limit):
+            break
     return result
 
 
