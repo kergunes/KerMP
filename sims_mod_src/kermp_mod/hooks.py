@@ -12,6 +12,10 @@ from .build_adapter import adapter
 bridge = KerMPBridgeClient()
 _installed = False
 _pending_travel_txn = None
+_wall_callback_registered = False
+_wall_event_count = 0
+_last_wall_event = None
+_wall_callback_info = {}
 
 
 def _log(message):
@@ -35,6 +39,7 @@ def install():
     bridge.on('sidecar.welcome', _sidecar_welcome)
     bridge.start()
     _install_build_buy_hooks()
+    _install_wall_contour_callback()
     _install_zone_hooks()
     _log('KerMP installed')
 
@@ -116,6 +121,96 @@ def _on_build_buy_enter():
 def _on_build_buy_exit():
     _log('KERMP BUILD MODE EXIT')
     bridge.emit('build.lock_release', {})
+
+
+def _wall_contour_update_callback(*args, **kwargs):
+    """Observe the game's real wall-change notification, if exposed."""
+    global _wall_event_count, _last_wall_event
+    _wall_event_count += 1
+    _last_wall_event = {'args': [repr(value)[:1000] for value in args],
+                        'kwargs': {str(key): repr(value)[:1000]
+                                   for key, value in kwargs.items()}}
+    _log('KERMP WALL EVENT count=%s args=%s kwargs=%s' %
+         (_wall_event_count, _last_wall_event['args'],
+          _last_wall_event['kwargs']))
+
+
+def inspect_wall_contour_callback():
+    """Inspect current_zone().wall_contour_update_callbacks safely."""
+    global _wall_callback_info
+    result = {'zone_available': False, 'attribute_exists': False,
+              'type': None, 'repr': None, 'callable': False,
+              'collection_semantics': None, 'registration_method': None,
+              'registered': _wall_callback_registered,
+              'event_count': _wall_event_count,
+              'last_event': _last_wall_event, 'error': None}
+    try:
+        import services
+        zone = services.current_zone()
+        result['zone_available'] = zone is not None
+        if zone is None:
+            _wall_callback_info = result
+            return result
+        result['attribute_exists'] = hasattr(zone, 'wall_contour_update_callbacks')
+        if not result['attribute_exists']:
+            _wall_callback_info = result
+            return result
+        callbacks = getattr(zone, 'wall_contour_update_callbacks')
+        result['type'] = type(callbacks).__name__
+        result['repr'] = repr(callbacks)[:1000]
+        result['callable'] = bool(callable(callbacks))
+        if hasattr(callbacks, 'append') and callable(getattr(callbacks, 'append')):
+            result['collection_semantics'] = 'appendable'
+        elif hasattr(callbacks, 'register') and callable(getattr(callbacks, 'register')):
+            result['collection_semantics'] = 'registerable'
+        else:
+            result['collection_semantics'] = 'callable-only' if result['callable'] else 'opaque'
+    except Exception as exc:
+        result['error'] = '%s: %s' % (type(exc).__name__, exc)
+    _wall_callback_info = result
+    return result
+
+
+def _install_wall_contour_callback():
+    """Register only through an explicitly collection-like Zone callback list."""
+    global _wall_callback_registered
+    result = inspect_wall_contour_callback()
+    if _wall_callback_registered or not result.get('attribute_exists'):
+        return result
+    try:
+        import services
+        callbacks = getattr(services.current_zone(), 'wall_contour_update_callbacks')
+        method_name = None
+        method = getattr(callbacks, 'append', None)
+        if callable(method):
+            method_name = 'append'
+        else:
+            method = getattr(callbacks, 'register', None)
+            if callable(method):
+                method_name = 'register'
+        if method is None:
+            return result
+        method(_wall_contour_update_callback)
+        _wall_callback_registered = True
+        result['registration_method'] = method_name
+        result['registered'] = True
+        _log('KERMP wall contour callback registered type=%s method=%s' %
+             (result.get('type'), method_name))
+    except Exception as exc:
+        result['error'] = '%s: %s' % (type(exc).__name__, exc)
+        _log('KERMP wall contour callback unavailable error=%s' % result['error'])
+    result['event_count'] = _wall_event_count
+    _wall_callback_info = result
+    return result
+
+
+def wall_event_probe():
+    """Refresh callback registration and return concise live diagnostics."""
+    result = _install_wall_contour_callback()
+    result['registered'] = _wall_callback_registered
+    result['event_count'] = _wall_event_count
+    result['last_event'] = _last_wall_event
+    return result
 
 
 def _install_build_buy_hooks():

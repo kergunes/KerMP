@@ -3,7 +3,7 @@ import json
 import sims4.commands
 import services
 
-from .hooks import bridge, probe_wall_contours
+from .hooks import bridge, probe_wall_contours, wall_event_probe
 from .build_adapter import adapter, build_buy_surface
 
 
@@ -53,6 +53,9 @@ def kermp_build_status(_connection=None):
     surface = build_buy_surface()
     out('build_buy_module=%s candidates=%s' %
         (surface['module_available'], ','.join(surface['candidates'])))
+    event = wall_event_probe()
+    out('wall_callback_available=%s registered=%s events=%s' %
+        (event['attribute_exists'], event['registered'], event['event_count']))
 
 
 @sims4.commands.Command('kermp.build.replay_last', command_type=sims4.commands.CommandType.Live)
@@ -76,3 +79,15 @@ def kermp_build_probe(_connection=None):
         out('before=%s after=%s added=%s removed=%s changed=%s' %
             (delta['before_count'], delta['after_count'], len(delta['added']),
              len(delta['removed']), len(delta['changed'])))
+
+
+@sims4.commands.Command('kermp.build.eventprobe', command_type=sims4.commands.CommandType.Live)
+def kermp_build_eventprobe(_connection=None):
+    event = wall_event_probe()
+    out = _out(_connection)
+    out('wall_callback_attribute_exists=%s type=%s callable=%s semantics=%s' %
+        (event['attribute_exists'], event['type'], event['callable'],
+         event['collection_semantics']))
+    out('wall_callback_registered=%s wall_events_seen=%s' %
+        (event['registered'], event['event_count']))
+    out('last_wall_event=%s' % event['last_event'])

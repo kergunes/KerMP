@@ -6,6 +6,19 @@ import time
 from kermp.bridge import LocalGameBridge
 
 
+def test_sims_bridge_emit_returns_send_result():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).parents[1] / 'sims_mod_src' / 'kermp_mod' / 'bridge_client.py'
+    spec = importlib.util.spec_from_file_location('kermp_sims_bridge_client', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    client = module.KerMPBridgeClient()
+    client._send = lambda event_type, payload: 'sent-result'
+    assert client.emit('test.event', {}) == 'sent-result'
+
+
 def _free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))

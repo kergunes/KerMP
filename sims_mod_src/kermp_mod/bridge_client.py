@@ -46,7 +46,7 @@ class KerMPBridgeClient(object):
         self.handlers[event_type] = handler
 
     def emit(self, event_type, payload):
-        self._send(event_type, payload)
+        return self._send(event_type, payload)
 
     def _send(self, event_type, payload):
         if not self.sock:
