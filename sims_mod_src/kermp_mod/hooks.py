@@ -207,16 +207,25 @@ def flush_travel_buffer():
 
 
 def inspect_distributor_boundary():
-    """Report only APIs present in the installed build; never guesses a call."""
-    result = {'modules': [], 'distributor': [], 'client_omega': [], 'error': None}
+    """Report live Distributor/client surfaces from the installed build."""
+    result = {
+        'modules': [], 'distributor': [], 'distributor_instance': [],
+        'client_methods': [], 'client_omega': [], 'client_type': None,
+        'omega_type': None, 'omega_repr': None, 'consts': {}, 'error': None,
+    }
+
+    def interesting(names):
+        needles = ('op', 'message', 'view', 'send', 'process', 'flush', 'distribut')
+        return sorted(name for name in names
+                      if not name.startswith('__') and any(n in name.lower() for n in needles))[:60]
+
     try:
         import inspect
-        import distributor
-        result['modules'].append('distributor')
-        cls = getattr(distributor, 'Distributor', None)
+        from distributor import system as distributor_system
+        result['modules'].append('distributor.system')
+        cls = getattr(distributor_system, 'Distributor', None)
         if cls is not None:
-            result['distributor'] = sorted(name for name in dir(cls)
-                                           if 'op' in name.lower() or 'message' in name.lower() or 'view' in name.lower())[:40]
+            result['distributor'] = interesting(dir(cls))
             result['distributor_signatures'] = {}
             for name in result['distributor']:
                 member = getattr(cls, name, None)
@@ -225,15 +234,41 @@ def inspect_distributor_boundary():
                         result['distributor_signatures'][name] = str(inspect.signature(member))[:200]
                     except Exception:
                         result['distributor_signatures'][name] = 'uninspectable'
+            try:
+                instance = cls.instance()
+            except Exception:
+                instance = None
+            if instance is not None:
+                result['distributor_instance'] = interesting(dir(instance))
+                result['distributor_instance_type'] = type(instance).__name__
     except Exception as exc:
         result['error'] = '%s: %s' % (type(exc).__name__, exc)
+
+    try:
+        from protocolbuffers import Consts_pb2
+        for name in dir(Consts_pb2):
+            if 'OBJECTS_VIEW_UPDATE' in name or 'VIEW_UPDATE' in name:
+                try:
+                    result['consts'][name] = int(getattr(Consts_pb2, name))
+                except Exception:
+                    result['consts'][name] = repr(getattr(Consts_pb2, name))[:200]
+    except Exception as exc:
+        result['consts_error'] = '%s: %s' % (type(exc).__name__, exc)
+
     try:
         import services
         client = services.get_first_client()
-        omega = getattr(client, 'omega', None) if client else None
-        if omega is not None:
-            result['client_omega'] = sorted(name for name in dir(omega)
-                                            if 'send' in name.lower() or 'message' in name.lower())[:40]
+        if client is not None:
+            result['client_type'] = type(client).__name__
+            result['client_methods'] = interesting(dir(client))
+            omega = getattr(client, 'omega', None)
+            if omega is not None:
+                result['omega_type'] = type(omega).__name__
+                result['omega_repr'] = repr(omega)[:300]
+                public = sorted(name for name in dir(omega) if not name.startswith('__'))
+                result['client_omega'] = interesting(public)
+                if not result['client_omega']:
+                    result['client_omega'] = public[:60]
     except Exception as exc:
         result['omega_error'] = '%s: %s' % (type(exc).__name__, exc)
     return result
