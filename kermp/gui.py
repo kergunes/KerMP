@@ -62,6 +62,11 @@ class StatusModel:
     view_updates_sent: int = 0
     view_updates_received: int = 0
     last_error: str = ""
+    compatibility: str = "Checking"
+    save_progress: str = "0%"
+    readiness: str = "Not ready"
+    clock: str = "Speed 1"
+    native: str = "Unavailable"
 
 
 class RuntimeController:
@@ -197,7 +202,7 @@ class KerMPGui(tk.Tk):
                 elif kind == "error": self.model.last_error = data; self._write_log("ERROR: %s" % data)
                 elif kind == "stopped": self.model.running = False; self.model.lan_state = "Disconnected"; self._write_log("Runtime stopped")
         except queue.Empty: pass
-        self.status_text.set("Mode: %s\nLAN: %s    Bridge: %s\nPlayer: %s\nSession: %s\nPlayers: %s\nAddress: %s\nBuild lock: %s\nLast error: %s" % (self.model.mode or "idle", self.model.lan_state, self.model.bridge_state, self.model.player_id or "—", self.model.session_id or "—", self.model.connected_players or "—", self.model.host_address or "—", self.model.build_owner, self.model.last_error or "none"))
+        self.status_text.set("Mode: %s\nLAN: %s    Bridge: %s\nPlayer: %s\nSession: %s\nPlayers: %s\nAddress: %s\nCompatibility: %s    Save: %s    Ready: %s\nClock: %s    Native Build/Buy: %s\nBuild lock: %s\nLast error: %s" % (self.model.mode or "idle", self.model.lan_state, self.model.bridge_state, self.model.player_id or "—", self.model.session_id or "—", self.model.connected_players or "—", self.model.host_address or "—", self.model.compatibility, self.model.save_progress, self.model.readiness, self.model.clock, self.model.native, self.model.build_owner, self.model.last_error or "none"))
         self.after(150, self._poll)
 
     def _write_log(self, text):

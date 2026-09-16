@@ -6,9 +6,12 @@ import uuid
 from dataclasses import dataclass, asdict
 from enum import Enum
 from typing import Any, Dict, Optional
+from . import PROTOCOL_VERSION
 
-PROTOCOL_VERSION = 1
 MAX_GAME_MESSAGE_BYTES = 2 * 1024 * 1024
+MAX_SAVE_CHUNK_BYTES = 256 * 1024
+MAX_NATIVE_MESSAGE_BYTES = 512 * 1024
+MAX_ENVELOPE_BYTES = MAX_GAME_MESSAGE_BYTES * 2
 
 
 class MessageType(str, Enum):
@@ -18,6 +21,25 @@ class MessageType(str, Enum):
     PING = "ping"
     PONG = "pong"
     ACK = "ack"
+    COMPATIBILITY = "compatibility"
+    READINESS = "readiness"
+    SAVE_MANIFEST = "save.manifest"
+    SAVE_BEGIN = "save.begin"
+    SAVE_CHUNK = "save.chunk"
+    SAVE_END = "save.end"
+    SAVE_ACK = "save.ack"
+    SAVE_ERROR = "save.error"
+    CLOCK_STATE = "clock.state"
+    CLOCK_REQUEST_SPEED = "clock.request_speed"
+    CLOCK_REQUEST_PAUSE = "clock.request_pause"
+    CLOCK_RESYNC = "clock.resync"
+    COMMAND_REQUEST = "command.request"
+    COMMAND_ACCEPTED = "command.accepted"
+    COMMAND_REJECTED = "command.rejected"
+    COMMAND_RESULT = "command.result"
+    DIALOG_OPEN = "dialog.open"
+    DIALOG_RESPONSE = "dialog.response"
+    DIALOG_CANCEL = "dialog.cancel"
 
     TRAVEL_REQUEST = "travel.request"
     TRAVEL_PROPOSE = "travel.propose"
@@ -33,6 +55,9 @@ class MessageType(str, Enum):
     BUILD_OPERATION = "build.operation"
     BUILD_APPLY = "build.apply"
     BUILD_LOCK_RELEASE = "build.lock_release"
+    BUILD_NATIVE_REQUEST = "build.native.request"
+    BUILD_NATIVE_RESULT = "build.native.result"
+    BUILD_NATIVE_REJECT = "build.native.reject"
 
     SNAPSHOT_REQUEST = "snapshot.request"
     SNAPSHOT = "snapshot"
@@ -81,6 +106,8 @@ class Envelope:
 
     @classmethod
     def from_line(cls, line: bytes | str) -> "Envelope":
+        if len(line) > MAX_ENVELOPE_BYTES:
+            raise ValueError("envelope_too_large")
         if isinstance(line, bytes):
             line = line.decode("utf-8")
         raw = json.loads(line)

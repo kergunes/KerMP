@@ -7,10 +7,13 @@ import socket
 import uuid
 import threading
 
+from kermp.compatibility import CompatibilityManifest
+from kermp.protocol import PROTOCOL_VERSION
+
 
 def send(sock, typ, player_id, payload=None):
     sock.sendall((json.dumps({'type': typ, 'payload': payload or {}, 'sender_id': player_id,
-                              'message_id': str(uuid.uuid4()), 'sent_at': 0, 'protocol_version': 1}) + '\n').encode())
+                              'message_id': str(uuid.uuid4()), 'sent_at': 0, 'protocol_version': PROTOCOL_VERSION}) + '\n').encode())
 
 
 def main():
@@ -22,7 +25,8 @@ def main():
     ap.add_argument('--auto-travel-ack', action='store_true')
     args = ap.parse_args()
     with socket.create_connection((args.host, args.port)) as sock:
-        send(sock, 'hello', args.player_id, {'display_name': args.name})
+        manifest = CompatibilityManifest.local(args.player_id, args.name)
+        send(sock, 'hello', args.player_id, {'display_name': args.name, 'manifest': manifest.to_dict()})
         sock_file = sock.makefile('rb')
         print(sock_file.readline().decode().strip())
         stop = threading.Event()

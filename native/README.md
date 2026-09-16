@@ -41,8 +41,9 @@ the Mods folder. It never copies proprietary Sims binaries into the repository.
 2. Copy `native\KerMPNative.pyd` and `sims_mod_src\KerMP.ts4script` to the
    active Sims Mods location and start the existing KerMP sidecar.
 3. In Sims run `kermp.native.status`. On this skeleton the expected safe result
-   is `native_loaded=True`, `game_build_supported=True`, and
-   `hook_installed=False` with `last_error=capture_boundary_unvalidated`.
+   is `native_loaded=True`, `native_game_build_supported=False`, and
+   `hook_installed=False` with `last_error=unsupported_build`. Metadata is now
+   diagnostic only: no historical build fingerprint authorizes a hook.
 4. Enter Build Mode and draw one simple wall. Run `kermp.native.status`, then
    `kermp.native.take`. Until a boundary is validated, the queue is expected to
    remain empty and the wall must still build normally.

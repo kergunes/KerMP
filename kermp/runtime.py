@@ -8,6 +8,7 @@ from typing import Deque, Optional
 from .bridge import BridgeEvent, LocalGameBridge
 from .net import KerMPHost, KerMPClient
 from .protocol import Envelope, MessageType, MAX_GAME_MESSAGE_BYTES
+from .save_sync import SaveReceiver, resolve_sims_user_dir
 
 
 class HostRuntime:
@@ -39,11 +40,13 @@ class HostRuntime:
 
     async def _on_game_event(self, event: BridgeEvent) -> None:
         if event.type == "game.hello":
+            readiness = self.host.session.update_readiness(self.host.player_id, bridge_connected=True)
             self.bridge.send("sidecar.welcome", {
                 "role": "host",
                 "player_id": self.host.player_id,
                 "protocol_version": 1,
             })
+            await self.host.broadcast(MessageType.READINESS, {"player_id": self.host.player_id, **readiness.snapshot()})
             return
 
         if event.type == MessageType.GAME_RAW_MESSAGE.value:
@@ -264,6 +267,7 @@ class ClientRuntime:
         self.max_buffered_view_updates = 256
         self.travel_batch_complete = False
         self.local_zone_loaded = False
+        self.save_receiver: SaveReceiver | None = None
 
     async def start(self) -> Envelope:
         self.loop = asyncio.get_running_loop()
@@ -285,6 +289,10 @@ class ClientRuntime:
                 "player_id": self.client.player_id,
                 "protocol_version": 1,
             })
+            # A connected script bridge is necessary but does not claim that
+            # client simulation suppression has been safely installed.
+            await self.client.send(MessageType.READINESS, {"bridge_connected": True,
+                "simulation_authority_ready": False})
             return
         # A client only sends local input upstream; it never echoes host game messages.
         if event.type == MessageType.TRAVEL_REQUEST.value:
@@ -314,6 +322,34 @@ class ClientRuntime:
             await self.client.send(MessageType.BUILD_LOCK_RELEASE)
 
     async def _on_network_message(self, env: Envelope) -> None:
+        if env.type == MessageType.SAVE_MANIFEST.value:
+            try:
+                self.save_receiver = SaveReceiver(env.payload, resolve_sims_user_dir() / "saves")
+                await self.client.send(MessageType.READINESS, {"save_total_bytes": self.save_receiver.total, "save_bytes_received": 0})
+            except ValueError as exc:
+                await self.client.send(MessageType.SAVE_ERROR, {"reason": str(exc)})
+            return
+        if env.type == MessageType.SAVE_CHUNK.value:
+            try:
+                if not self.save_receiver: raise ValueError("save_transfer_not_started")
+                raw = base64.b64decode(str(env.payload.get("payload_b64", "")), validate=True)
+                self.save_receiver.write_chunk(int(env.payload.get("index", -1)), raw)
+                await self.client.send(MessageType.READINESS, {"save_total_bytes": self.save_receiver.total, "save_bytes_received": self.save_receiver.received})
+            except Exception as exc:
+                if self.save_receiver: self.save_receiver.abort()
+                await self.client.send(MessageType.SAVE_ERROR, {"reason": str(exc)})
+            return
+        if env.type == MessageType.SAVE_END.value:
+            try:
+                if not self.save_receiver: raise ValueError("save_transfer_not_started")
+                final_path, backup = self.save_receiver.finalize(str(env.payload.get("session_id") or "unknown"))
+                await self.client.send(MessageType.SAVE_ACK, {"slot_id": self.save_receiver.slot_id, "sha256": self.save_receiver.expected_hash,
+                    "total_bytes": self.save_receiver.total, "path": str(final_path), "backup_created": bool(backup)})
+            except Exception as exc:
+                await self.client.send(MessageType.SAVE_ERROR, {"reason": str(exc)})
+            finally:
+                self.save_receiver = None
+            return
         if env.type == MessageType.GAME_RAW_MESSAGE.value:
             sequence = int(env.payload.get('sequence', 0))
             if sequence <= self._last_game_sequence:

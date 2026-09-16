@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Dict, Optional
 
 from .buildsync import BuildAuthority
+from .compatibility import CompatibilityManifest, compare_manifests
+from .readiness import P0CoreReadiness, PlayerReadiness
+from .routing import DialogRouter, NetworkedCommandRouter
 from .travel import TravelCoordinator
 
 
@@ -12,6 +15,8 @@ class Player:
     player_id: str
     display_name: str
     active_sim_id: Optional[str] = None
+    manifest: Optional[CompatibilityManifest] = None
+    readiness: PlayerReadiness = field(default_factory=PlayerReadiness)
 
 
 @dataclass
@@ -24,10 +29,17 @@ class HostSession:
     sims: Dict[str, dict] = field(default_factory=dict)
     interaction_requests: Dict[str, dict] = field(default_factory=dict)
     reconnect_sim_ids: Dict[str, str] = field(default_factory=dict)
+    host_manifest: Optional[CompatibilityManifest] = None
+    native_build_buy_required: bool = False
+    clock: dict = field(default_factory=lambda: {"sequence": 0, "game_time": None, "speed": 1, "paused": False})
+    commands: NetworkedCommandRouter = field(default_factory=NetworkedCommandRouter)
+    dialogs: DialogRouter = field(default_factory=DialogRouter)
 
-    def add_player(self, player_id: str, display_name: str) -> Player:
+    def add_player(self, player_id: str, display_name: str, manifest: Optional[CompatibilityManifest] = None) -> Player:
         p = Player(player_id, display_name)
         self.players[player_id] = p
+        if manifest:
+            self.set_manifest(player_id, manifest)
         saved = self.reconnect_sim_ids.get(player_id)
         if saved in self.sims:
             p.active_sim_id = saved
@@ -45,13 +57,46 @@ class HostSession:
             self.build.lock = None
             self.build._lease_id = None
         self.travel.remove_participant(player_id)
+        self.dialogs.disconnect(player_id)
 
     def snapshot(self) -> dict:
         return {"session_id": self.session_id, "session_name": self.session_name,
                 "players": [{"player_id": p.player_id, "display_name": p.display_name,
                              "active_sim_id": p.active_sim_id}
                             for p in self.players.values()],
-                "sims": list(self.sims.values()), "travel": self.travel.snapshot(), "build": self.build.snapshot()}
+                "sims": list(self.sims.values()), "travel": self.travel.snapshot(), "build": self.build.snapshot(),
+                "clock": dict(self.clock), "readiness": {pid: p.readiness.snapshot() for pid, p in self.players.items()},
+                "core_readiness": asdict(self.core_readiness()) | {"core_ready": self.core_readiness().core_ready}}
+
+    def set_manifest(self, player_id: str, manifest: CompatibilityManifest) -> list[str]:
+        player = self.players[player_id]
+        player.manifest = manifest
+        reasons = compare_manifests(self.host_manifest, manifest, native_required=self.native_build_buy_required) if self.host_manifest and player_id != self.host_manifest.player_id else []
+        player.readiness.compatibility_reasons = tuple(reasons)
+        player.readiness.native_ready = bool(manifest.native_available and manifest.native_game_build_supported) if self.native_build_buy_required else True
+        player.readiness.advance()
+        return reasons
+
+    def update_readiness(self, player_id: str, **fields: object) -> PlayerReadiness:
+        ready = self.players[player_id].readiness
+        for key, value in fields.items():
+            if not hasattr(ready, key): raise ValueError("unknown_readiness_field")
+            setattr(ready, key, value)
+        ready.advance()
+        return ready
+
+    def core_readiness(self) -> P0CoreReadiness:
+        players = list(self.players.values())
+        return P0CoreReadiness(
+            compatibility_ready=bool(players) and all(not p.readiness.compatibility_reasons for p in players),
+            save_ready=bool(players) and all(bool(p.readiness.save_hash) for p in players),
+            bridge_ready=bool(players) and all(p.readiness.bridge_connected for p in players),
+            zone_ready=bool(players) and all(p.readiness.zone_ready for p in players),
+            simulation_authority_ready=bool(players) and all(p.readiness.simulation_authority_ready for p in players),
+            clock_ready=bool(self.clock), interaction_router_ready=True, dialog_router_ready=True,
+            travel_ready=True,
+            native_build_buy_ready=(not self.native_build_buy_required or all(p.readiness.native_ready for p in players)),
+        )
 
     def update_sims(self, sims: list[dict]) -> None:
         previous = self.sims

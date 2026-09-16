@@ -45,7 +45,15 @@ def kermp_core_status(_connection=None):
          getattr(hooks, '_last_view_update_msg_id', 'unknown')))
     out('travel_state=%s travel_epoch=%s buffered_view_updates=%s timeline_mode=normal' %
         ('pending' if hooks._pending_travel_txn else 'idle', hooks._travel_epoch,
-         len(hooks._travel_buffer)))
+        len(hooks._travel_buffer)))
+
+
+@sims4.commands.Command('kermp.simulation.status', command_type=sims4.commands.CommandType.Live)
+def kermp_simulation_status(_connection=None):
+    status = hooks.simulation_status()
+    _out(_connection)('role=%s timeline_suppression_available=%s installed=%s local_simulation_enabled=%s clock_source=%s last_error=%s' %
+        (status.get('role'), status.get('timeline_suppression_available'), status.get('installed'),
+         status.get('local_simulation_enabled'), status.get('clock_source'), status.get('last_error') or 'none'))
 
 
 @sims4.commands.Command('kermp.distributor.status', command_type=sims4.commands.CommandType.Live)
@@ -224,11 +232,6 @@ def kermp_build_object_status(_connection=None):
 def kermp_build_object_reset(_connection=None):
     adapter.reset_diagnostics()
     _out(_connection)('KerMP Build/Buy diagnostics reset')
-
-
-@sims4.commands.Command('kermp.build.object.status', command_type=sims4.commands.CommandType.Live)
-def kermp_build_object_status(_connection=None):
-    return kermp_build_status(_connection)
 
 
 @sims4.commands.Command('kermp.native.status', command_type=sims4.commands.CommandType.Live)

@@ -41,6 +41,9 @@ _travel_last_error = None
 _build_hook_info = {}
 _build_last_error = None
 _build_capture_depth = 0
+_simulation_status = {'role': 'unknown', 'timeline_suppression_available': False,
+                      'installed': False, 'local_simulation_enabled': True,
+                      'clock_source': 'local', 'last_error': 'sidecar_not_connected'}
 
 
 def _log(message):
@@ -89,7 +92,36 @@ def install():
 def _sidecar_welcome(payload):
     global _sidecar_role
     _sidecar_role = payload.get('role')
+    _configure_simulation_authority(_sidecar_role)
     _log('Sidecar connected role=%s' % payload.get('role'))
+
+
+def _configure_simulation_authority(role):
+    """Report a fail-closed client authority boundary without guessing a patch.
+
+    A Timeline monkey patch is deliberately not installed until a current-build
+    live signature and presentation-safe behavior are captured. Host simulation
+    is untouched. The sidecar therefore cannot advertise authoritative-client
+    readiness on this unvalidated build.
+    """
+    global _simulation_status
+    _simulation_status = {'role': role or 'unknown', 'timeline_suppression_available': False,
+                          'installed': False, 'local_simulation_enabled': role != 'client',
+                          'clock_source': 'host' if role == 'client' else 'local', 'last_error': None}
+    if role != 'client':
+        return
+    try:
+        import scheduling
+        timeline = getattr(scheduling, 'Timeline', None)
+        simulate = getattr(timeline, 'simulate', None)
+        _simulation_status['timeline_suppression_available'] = bool(callable(simulate))
+        _simulation_status['last_error'] = 'timeline_suppression_unvalidated'
+    except Exception as exc:
+        _simulation_status['last_error'] = 'timeline_unavailable:%s' % type(exc).__name__
+
+
+def simulation_status():
+    return dict(_simulation_status)
 
 
 def _view_update_message_id():
