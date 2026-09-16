@@ -7,6 +7,14 @@ from .hooks import bridge, probe_wall_contours, wall_event_probe
 from .build_adapter import adapter, build_buy_surface
 
 
+def _native_module():
+    try:
+        import KerMPNative
+        return KerMPNative
+    except Exception:
+        return None
+
+
 def _out(connection):
     return sims4.commands.CheatOutput(connection)
 
@@ -56,6 +64,43 @@ def kermp_build_status(_connection=None):
     event = wall_event_probe()
     out('wall_callback_available=%s registered=%s events=%s' %
         (event['attribute_exists'], event['registered'], event['event_count']))
+
+
+@sims4.commands.Command('kermp.native.status', command_type=sims4.commands.CommandType.Live)
+def kermp_native_status(_connection=None):
+    out = _out(_connection)
+    native = _native_module()
+    if native is None:
+        out('native_loaded=False game_build_supported=False hook_installed=False captures=0 last_error=module_unavailable')
+        return
+    try:
+        native.initialize()
+        status = native.status()
+        out('native_loaded=%s game_build_supported=%s hook_installed=%s captures=%s last_error=%s' %
+            (status.get('native_loaded'), status.get('game_build_supported'),
+             status.get('hook_installed'), status.get('capture_count'),
+             status.get('last_error')))
+    except Exception as exc:
+        out('native_loaded=False game_build_supported=False hook_installed=False captures=0 last_error=%s' % exc)
+
+
+@sims4.commands.Command('kermp.native.take', command_type=sims4.commands.CommandType.Live)
+def kermp_native_take(_connection=None):
+    out = _out(_connection)
+    native = _native_module()
+    if native is None:
+        out('native capture unavailable: module_unavailable')
+        return
+    try:
+        capture = native.take_build_operation()
+        if capture is None:
+            out('native capture queue empty')
+        else:
+            out('capture_id=%s payload_size=%s payload_hash=%s thread_id=%s' %
+                (capture.get('capture_id'), capture.get('payload_size'),
+                 capture.get('payload_hash'), capture.get('thread_id')))
+    except Exception as exc:
+        out('native capture unavailable: %s' % exc)
 
 
 @sims4.commands.Command('kermp.build.replay_last', command_type=sims4.commands.CommandType.Live)

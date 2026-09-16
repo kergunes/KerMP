@@ -10,6 +10,8 @@ kermp.status
 kermp.ping
 kermp.build.status
 kermp.build.probe
+kermp.native.status
+kermp.native.take
 ```
 
 After a real committed wall hook reports `capture_available=True`, draw one
@@ -165,7 +167,7 @@ archive into the Sims `Mods` folder and enable script mods. The current bridge
 is localhost-only; it does not make the Sims process a LAN server.
 
 In-game diagnostics: `kermp.status`, `kermp.ping`, `kermp.travel.request`,
-`kermp.wall.test`. Expected logs include `sidecar.welcome`, `travel.prepare`,
+`kermp.wall.test`, `kermp.native.status`, and `kermp.native.take`. Expected logs include `sidecar.welcome`, `travel.prepare`,
 `travel.commit`, `travel.zone_ready`, `travel.resume`, and `build.apply`.
 When broken, collect both sidecar stdout/stderr, the fake-game output, the
 player IDs, host/client LAN IPs and ports, and the first protocol error; do not
