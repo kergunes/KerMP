@@ -225,13 +225,10 @@ def _restore_entry(entry):
     if entry['name'] == 'kermp_mod.hooks':
         # Reinstall the old generation so refreshed monkey patches point back at
         # the restored code rather than the failed generation.
-        try:
-            module.__dict__['_installed'] = False
-            install = module.__dict__.get('install')
-            if callable(install):
-                install()
-        except Exception:
-            pass
+        module.__dict__['_installed'] = False
+        install = module.__dict__.get('install')
+        if callable(install):
+            install()
 
 
 def _health(entry):
@@ -293,15 +290,30 @@ def _reload_modules(module_names):
         }
         result_payload = dict(runtime.last_reload)
     except Exception as exc:
+        original_traceback = traceback.format_exc()
+        rollback_errors = []
         for entry in reversed(applied):
-            _restore_entry(entry)
+            try:
+                _restore_entry(entry)
+            except Exception as rollback_exc:
+                rollback_errors.append(
+                    '%s:%s:%s' % (
+                        entry['name'], type(rollback_exc).__name__, rollback_exc
+                    )
+                )
         runtime.last_reload = {
             'ok': False,
             'generation': runtime.reload_generation,
             'modules': [entry['name'] for entry in prepared],
             'error': '%s: %s' % (type(exc).__name__, exc),
-            'traceback': traceback.format_exc(),
+            'traceback': original_traceback,
+            'rollback_errors': rollback_errors,
+            'restart_required': bool(rollback_errors),
         }
+        if rollback_errors:
+            raise RuntimeError(
+                'reload_failed_and_rollback_failed:%s' % ';'.join(rollback_errors)
+            )
         raise
     finally:
         runtime.reload_in_progress = False
@@ -371,7 +383,16 @@ def kermp_reload(module: str = '', _connection=None):
         names = [_normalize_module(module)]
         restart_required = [name for name in names if name in _STABLE_MODULES]
         names = [name for name in names if name not in _STABLE_MODULES]
-        request = {'generation': 0}
+        request = _pending_request()
+        if request:
+            try:
+                _validate_published_generation(request)
+            except Exception as exc:
+                output('KerMP reload REFUSED: %s: %s' % (type(exc).__name__, exc))
+                output('Published source generation is incomplete or inconsistent; runtime unchanged.')
+                return
+        else:
+            request = {'generation': 0}
     else:
         request = _pending_request()
         if not request:
@@ -409,10 +430,21 @@ def kermp_reload(module: str = '', _connection=None):
         if restart_required:
             output('Game restart also required for: %s' % ','.join(restart_required))
     except Exception as exc:
-        result = {'ok': False, 'modules': names, 'error': '%s: %s' % (type(exc).__name__, exc)}
+        last = dict(runtime.last_reload)
+        result = {
+            'ok': False,
+            'modules': names,
+            'error': '%s: %s' % (type(exc).__name__, exc),
+        }
+        if last.get('restart_required'):
+            restart_required = sorted(set(restart_required + ['runtime_recovery']))
         _write_ack(request, result, restart_required)
         output('KerMP reload FAILED: %s' % result['error'])
-        output('Runtime remains on the previous accepted generation; inspect KerMP log before retrying.')
+        if last.get('rollback_errors'):
+            output('Rollback also failed; restart Sims before further KerMP testing.')
+            output('Rollback errors: %s' % ';'.join(last.get('rollback_errors') or []))
+        else:
+            output('Runtime remains on the previous accepted generation; inspect KerMP log before retrying.')
 
 
 @sims4.commands.Command('kermp.reload.all', command_type=sims4.commands.CommandType.Live)
