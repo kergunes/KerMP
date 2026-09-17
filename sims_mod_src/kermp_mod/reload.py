@@ -13,7 +13,7 @@ import sys
 
 import sims4.commands
 
-_RELOAD_ORDER = ('bridge_client', 'build_adapter', 'hooks', 'commands')
+_RELOAD_ORDER = ('bridge_client', 'build_adapter', 'hooks', 'lifecycle_guard', 'commands')
 
 
 def _out(connection):
@@ -29,6 +29,7 @@ def kermp_reload(_connection=None):
     out = _out(_connection)
     from . import hooks
     hooks_name = getattr(hooks, '__name__', 'kermp_mod.hooks')
+    package_name = hooks_name.rsplit('.', 1)[0]
     package_dir = _package_dir(hooks)
     for name in _RELOAD_ORDER:
         if not os.path.isfile(os.path.join(package_dir, name + '.py')):
@@ -58,7 +59,11 @@ def kermp_reload(_connection=None):
             out('reload failed %s: %s' % (name, exc))
             return
     hooks_mod = sys.modules.get(hooks_name) or hooks
+    lifecycle_mod = sys.modules.get(package_name + '.lifecycle_guard')
     try:
+        if lifecycle_mod is None:
+            lifecycle_mod = __import__(package_name + '.lifecycle_guard', fromlist=['install'])
+        lifecycle_mod.install(hooks_mod)
         hooks_mod.install()
         out('KerMP reinstalled')
     except Exception as exc:
