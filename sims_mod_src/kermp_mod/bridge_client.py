@@ -106,7 +106,7 @@ class KerMPBridgeClient(object):
                 self._dispatch_condition.wait(remaining)
             return True
 
-    def _run_handler(self, handler, payload):
+    def _run_handler(self, handler, payload, suppress_errors=False):
         try:
             handler(payload)
             return None
@@ -114,7 +114,9 @@ class KerMPBridgeClient(object):
             with self._lock:
                 self._dispatch_error_count += 1
                 self._last_dispatch_error = '%s: %s' % (type(exc).__name__, exc)
-            return exc
+            if suppress_errors:
+                return exc
+            raise
         finally:
             with self._dispatch_condition:
                 self._active_dispatches -= 1
@@ -138,7 +140,7 @@ class KerMPBridgeClient(object):
                 if not handler:
                     continue
                 self._active_dispatches += 1
-            error = self._run_handler(handler, msg.get("payload", {}))
+            error = self._run_handler(handler, msg.get("payload", {}), suppress_errors=True)
             if error is not None:
                 errors += 1
 
