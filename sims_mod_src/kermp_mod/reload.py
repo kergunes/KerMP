@@ -35,9 +35,14 @@ def kermp_reload(_connection=None):
             out('dev source missing for %s (run build.py --dev first)' % name)
             return
     try:
-        hooks.teardown()
+        teardown_errors = hooks.teardown()
     except Exception as exc:
-        out('teardown failed: %s' % exc)
+        teardown_errors = ['teardown raised: %s' % exc]
+    if teardown_errors:
+        for error in teardown_errors:
+            out('teardown error: %s' % error)
+        out('reload aborted: teardown incomplete')
+        return
     import sims4.reload as reload_service
     reload_fn = (getattr(reload_service, 'reload_file', None)
                  or getattr(reload_service, 'reload', None))

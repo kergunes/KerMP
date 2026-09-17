@@ -62,6 +62,15 @@ def find_py37():
     raise RuntimeError('Python 3.7 not found. Set PYTHON37 to python.exe.')
 
 
+def _copy_dev_source():
+    for src in SOURCE.rglob('*.py'):
+        rel = src.relative_to(SOURCE)
+        dst = DEV_DIR / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src), str(dst))
+    print('Synced dev source to %s' % DEV_DIR)
+
+
 def install_dev():
     """Install loose .py source so in-game hot reload (kermp.reload) works.
 
@@ -73,19 +82,38 @@ def install_dev():
     if INSTALL_OUT.exists():
         INSTALL_OUT.unlink()
         print('Removed %s (dev mode uses loose source)' % INSTALL_OUT)
-    for src in SOURCE.rglob('*.py'):
-        rel = src.relative_to(SOURCE)
-        dst = DEV_DIR / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(src), str(dst))
-    print('Installed dev source to %s' % DEV_DIR)
+    _copy_dev_source()
     print('Restart the game once, then hot reload with `kermp.reload`.')
 
 
+def sync_dev_source():
+    """Re-copy repo source into the installed dev tree (edit -> reload loop).
+
+    Use after editing the repo without a game restart: run this, then
+    `kermp.reload` in the Sims console. It does not touch the compiled build.
+    """
+    _copy_dev_source()
+
+
+def clean_dev_source():
+    """Remove KerMP's own dev source tree before a packaged install.
+
+    Deletes only ``Mods/KerMP/Scripts/kermp_mod`` so a packaged ``.ts4script``
+    is not loaded alongside a stale loose dev copy.
+    """
+    if DEV_DIR.exists():
+        shutil.rmtree(str(DEV_DIR))
+        print('Removed dev source tree %s' % DEV_DIR)
+
+
 def main():
+    if '--dev-sync' in sys.argv:
+        sync_dev_source()
+        return
     if '--dev' in sys.argv:
         install_dev()
         return
+    clean_dev_source()
     py = find_py37()
     with tempfile.TemporaryDirectory() as td:
         work = Path(td)

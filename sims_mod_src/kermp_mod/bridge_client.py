@@ -17,8 +17,10 @@ PORT = 17654
 class KerMPBridgeClient(object):
     def __init__(self):
         self.sock = None
+        self._file = None
         self._stop = False
         self.handlers = {}
+        self._thread = None
 
     def connect(self):
         while not self._stop:
@@ -28,23 +30,45 @@ class KerMPBridgeClient(object):
                 self._send("game.hello", {"bridge_version": 1})
                 self._read_loop()
             except Exception:
+                if self._stop:
+                    break
                 time.sleep(1.0)
             finally:
-                try:
-                    if self.sock:
-                        self.sock.close()
-                except Exception:
-                    pass
-                self.sock = None
+                self._close_transport()
 
     def start(self):
-        t = threading.Thread(target=self.connect)
-        t.daemon = True
-        t.start()
+        self._stop = False
+        self._thread = threading.Thread(target=self.connect)
+        self._thread.daemon = True
+        self._thread.start()
 
     def stop(self):
-        """Signal the reader thread to exit and close the socket."""
+        """Idempotently stop the reader thread and release the socket.
+
+        Closing a socket does not reliably unblock a thread blocked in
+        ``makefile().readline()`` because the file object holds a reference to
+        the descriptor. Shutdown the socket first to force the pending read to
+        return, then close the file object and the socket, and join the reader
+        thread with a short bound so it cannot outlive this instance.
+        """
         self._stop = True
+        try:
+            if self.sock:
+                self.sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        self._close_transport()
+        thread, self._thread = self._thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+
+    def _close_transport(self):
+        f, self._file = self._file, None
+        try:
+            if f is not None:
+                f.close()
+        except Exception:
+            pass
         try:
             if self.sock:
                 self.sock.close()
@@ -67,11 +91,19 @@ class KerMPBridgeClient(object):
 
     def _read_loop(self):
         f = self.sock.makefile("rb")
-        while not self._stop:
-            line = f.readline()
-            if not line:
-                break
-            msg = json.loads(line.decode("utf-8"))
-            handler = self.handlers.get(msg.get("type"))
-            if handler:
-                handler(msg.get("payload", {}))
+        self._file = f
+        try:
+            while not self._stop:
+                line = f.readline()
+                if not line:
+                    break
+                msg = json.loads(line.decode("utf-8"))
+                handler = self.handlers.get(msg.get("type"))
+                if handler:
+                    handler(msg.get("payload", {}))
+        finally:
+            self._file = None
+            try:
+                f.close()
+            except Exception:
+                pass

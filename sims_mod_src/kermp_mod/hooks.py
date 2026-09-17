@@ -15,6 +15,7 @@ bridge = KerMPBridgeClient()
 _installed = False
 _pending_travel_txn = None
 _wall_callback_registered = False
+_wall_callback_registration = None
 _wall_event_count = 0
 _last_wall_event = None
 _wall_callback_info = {}
@@ -43,7 +44,10 @@ _build_last_error = None
 _build_capture_depth = 0
 _simulation_status = {'role': 'unknown', 'timeline_suppression_available': False,
                       'installed': False, 'local_simulation_enabled': True,
-                      'clock_source': 'local', 'last_error': 'sidecar_not_connected'}
+                      'clock_source': 'local', 'bypass': False,
+                      'last_error': 'sidecar_not_connected'}
+_simulation_bypass = False
+_timeline_suppression_installed = False
 _patches = []
 
 
@@ -97,24 +101,36 @@ def install():
 def teardown():
     """Restore patched originals and stop the bridge before a hot reload.
 
-    A hot reload re-executes this module in a fresh namespace. Without a
-    teardown, previously monkey-patched game functions keep pointing at stale
-    closures and the old bridge socket is orphaned.
+    Returns a list of error strings; an empty list means teardown completed.
+    The caller should abort the reload on a non-empty result, because the
+    runtime may otherwise be left in an unknown half-dismantled state.
     """
-    global _installed
+    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed
+    errors = []
+    # Stop accepting new bridge events first.
+    try:
+        bridge.stop()
+    except Exception as exc:
+        errors.append('bridge stop: %s' % exc)
     for target, attr, original in _patches:
         try:
             setattr(target, attr, original)
-        except Exception:
-            _log('KERMP TEARDOWN restore failed target=%s attr=%s' %
-                 (type(target).__name__, attr))
+        except Exception as exc:
+            errors.append('restore %s.%s: %s' % (type(target).__name__, attr, exc))
     del _patches[:]
-    _teardown_build_buy_callbacks()
-    _installed = False
     try:
-        bridge.stop()
-    except Exception:
-        pass
+        _teardown_wall_contour_callback()
+    except Exception as exc:
+        errors.append('wall callback: %s' % exc)
+    try:
+        _teardown_build_buy_callbacks()
+    except Exception as exc:
+        errors.append('build/buy callbacks: %s' % exc)
+    _wall_callback_registered = False
+    _game_message_capture_installed = False
+    _timeline_suppression_installed = False
+    _installed = False
+    return errors
 
 
 def _teardown_build_buy_callbacks():
@@ -130,8 +146,29 @@ def _teardown_build_buy_callbacks():
         if callable(unregister):
             try:
                 unregister(callback)
-            except Exception:
-                pass
+            except Exception as exc:
+                _log('KERMP TEARDOWN build/buy unregister failed %s: %s' %
+                     (unregister_name, exc))
+
+
+def _teardown_wall_contour_callback():
+    """Remove the wall contour callback using its recorded collection semantics."""
+    global _wall_callback_registered, _wall_callback_registration
+    registration, _wall_callback_registration = _wall_callback_registration, None
+    _wall_callback_registered = False
+    if not registration:
+        return
+    collection, method_name = registration
+    method_names = ('unregister', 'remove', 'discard') if method_name == 'register' else ('remove', 'discard')
+    for name in method_names:
+        method = getattr(collection, name, None)
+        if not callable(method):
+            continue
+        try:
+            method(_wall_contour_update_callback)
+            return
+        except Exception:
+            continue
 
 
 def _sidecar_welcome(payload):
@@ -142,27 +179,67 @@ def _sidecar_welcome(payload):
 
 
 def _configure_simulation_authority(role):
-    """Report a fail-closed client authority boundary without guessing a patch.
+    """Install authoritative-client simulation suppression for the client role.
 
-    A Timeline monkey patch is deliberately not installed until a current-build
-    live signature and presentation-safe behavior are captured. Host simulation
-    is untouched. The sidecar therefore cannot advertise authoritative-client
-    readiness on this unvalidated build.
+    The host never suppresses its own simulation. A client installs a reversible
+    wrapper on ``scheduling.Timeline.simulate`` that suppresses normal gameplay
+    simulation but runs the original during travel loading (bypass). The patch is
+    role-checked at call time and participates in the ``_patches`` teardown.
     """
     global _simulation_status
     _simulation_status = {'role': role or 'unknown', 'timeline_suppression_available': False,
                           'installed': False, 'local_simulation_enabled': role != 'client',
-                          'clock_source': 'host' if role == 'client' else 'local', 'last_error': None}
+                          'clock_source': 'host' if role == 'client' else 'local',
+                          'bypass': bool(_simulation_bypass), 'last_error': None}
     if role != 'client':
         return
+    _install_timeline_suppression()
+
+
+def _install_timeline_suppression():
+    global _timeline_suppression_installed
+    if _timeline_suppression_installed:
+        return True
     try:
         import scheduling
         timeline = getattr(scheduling, 'Timeline', None)
-        simulate = getattr(timeline, 'simulate', None)
-        _simulation_status['timeline_suppression_available'] = bool(callable(simulate))
-        _simulation_status['last_error'] = 'timeline_suppression_unvalidated'
+        if timeline is None:
+            _simulation_status['last_error'] = 'timeline_missing'
+            return False
+        original = getattr(timeline, 'simulate', None)
+        if not callable(original):
+            _simulation_status['last_error'] = 'timeline_simulate_missing'
+            return False
+        if getattr(original, '_kermp_wrapped', False):
+            _timeline_suppression_installed = True
+            _simulation_status.update({'timeline_suppression_available': True, 'installed': True,
+                                       'local_simulation_enabled': False, 'last_error': None})
+            return True
+
+        def wrapped(*args, **kwargs):
+            if _sidecar_role == 'client' and not _simulation_bypass:
+                return None
+            return original(*args, **kwargs)
+
+        wrapped._kermp_wrapped = True
+        wrapped._kermp_original = original
+        timeline.simulate = wrapped
+        _record_patch(timeline, 'simulate', original)
+        _timeline_suppression_installed = True
+        _simulation_status.update({'timeline_suppression_available': True, 'installed': True,
+                                   'local_simulation_enabled': False, 'last_error': None})
+        _log('KERMP simulation suppression installed (client)')
+        return True
     except Exception as exc:
-        _simulation_status['last_error'] = 'timeline_unavailable:%s' % type(exc).__name__
+        _simulation_status['last_error'] = 'timeline_install:%s: %s' % (type(exc).__name__, exc)
+        return False
+
+
+def set_simulation_bypass(active):
+    """Toggle the travel-loading simulation bypass (client role only)."""
+    global _simulation_bypass
+    _simulation_bypass = bool(active)
+    _simulation_status['bypass'] = bool(active)
 
 
 def simulation_status():
@@ -560,6 +637,7 @@ def _travel_prepare(payload):
     _travel_selected_sim_id = _active_sim_id()
     _travel_zone_reported = False
     if _sidecar_role == 'client':
+        set_simulation_bypass(True)
         begin_travel_buffer(_travel_epoch)
     # v0.0.1 is immediately ready after storing local state. Selected-Sim/camera
     # snapshots are added once the travel call itself is bound.
@@ -575,6 +653,7 @@ def _travel_commit(payload):
     _travel_api_info = {'zone_id': str(payload.get('zone_id')), 'signature': 'unknown'}
     _travel_last_error = None
     if _sidecar_role == 'client':
+        set_simulation_bypass(True)
         begin_travel_buffer(_travel_epoch)
     try:
         if _sidecar_role == 'host' or _sidecar_role == 'client':
@@ -607,6 +686,7 @@ def _travel_abort(payload):
     global _pending_travel_txn, _travel_last_error
     _travel_last_error = str(payload.get('reason') or 'travel_aborted')
     _pending_travel_txn = None
+    set_simulation_bypass(False)
 
 
 def _active_sim_id():
@@ -659,6 +739,7 @@ def _finish_zone_hydration():
     bridge.emit('travel.zone_ready', {'txn_id': _pending_travel_txn, 'epoch': _travel_epoch,
                                       'zone_id': str(_current_zone_id()), 'selected_sim_restored': restored})
     _travel_zone_reported = True
+    set_simulation_bypass(False)
     return True
 
 
@@ -909,7 +990,7 @@ def inspect_wall_contour_callback():
 
 def _install_wall_contour_callback():
     """Register only through an explicitly collection-like Zone callback list."""
-    global _wall_callback_registered
+    global _wall_callback_registered, _wall_callback_registration
     result = inspect_wall_contour_callback()
     if _wall_callback_registered or not result.get('attribute_exists'):
         return result
@@ -928,6 +1009,7 @@ def _install_wall_contour_callback():
             return result
         method(_wall_contour_update_callback)
         _wall_callback_registered = True
+        _wall_callback_registration = (callbacks, method_name)
         result['registration_method'] = method_name
         result['registered'] = True
         _log('KERMP wall contour callback registered type=%s method=%s' %
@@ -1305,7 +1387,7 @@ def _object_value(obj):
                 value = value()
             except Exception:
                 continue
-        if isinstance(value, (int, float)) and value > 0:
+        if isinstance(value, (int, float)) and value >= 0:
             return int(value)
     return None
 
@@ -1328,39 +1410,6 @@ def _object_household_id(obj):
         return int(household_id)
     except (TypeError, ValueError):
         return None
-
-
-def _sell_funds_reason():
-    try:
-        from protocolbuffers import Consts_pb2
-    except Exception:
-        return 0
-    for name in ('TELEMETRY_MONEY_SELL_OBJECT', 'TELEMETRY_MONEY_BUILD_BUY',
-                 'TELEMETRY_MONEY_BUILD', 'TELEMETRY_MONEY_CHEAT'):
-        reason = getattr(Consts_pb2, name, None)
-        if isinstance(reason, int):
-            return reason
-    return 0
-
-
-def _apply_destroy_refund(obj, object_id, zone_id):
-    """Refund a sold object's value to its household. Host-authoritative only."""
-    value = _object_value(obj)
-    household_id = _object_household_id(obj)
-    if not value or household_id is None:
-        _log('KERMP DESTROY REFUND skipped object_id=%s value=%s household_id=%s' %
-             (object_id, value, household_id))
-        return False
-    try:
-        import build_buy
-        result = build_buy.c_api_modify_household_funds(
-            value, household_id, _sell_funds_reason(), zone_id)
-        _log('KERMP DESTROY REFUND object_id=%s value=%s household_id=%s result=%s' %
-             (object_id, value, household_id, result))
-        return bool(result)
-    except Exception as exc:
-        _log('KERMP DESTROY REFUND ERROR %s: %s' % (type(exc).__name__, exc))
-        return False
 
 
 def _apply_object_operation(operation):
@@ -1388,10 +1437,11 @@ def _apply_object_operation(operation):
                 _apply_object_location(obj, object_id or getattr(obj, 'id', None), zone_id, data)
             return True
         if op == 'object.destroy':
+            # Household funds are authoritative and captured as a separate
+            # `funds.modify` operation by the host; a destroy apply must never
+            # mutate funds (see BUILD_BUY_OBJECT_CAPTURE.md). Refunding here would
+            # double-credit on the host and credit a failed destroy.
             import objects.system
-            if _sidecar_role == 'host':
-                target = services.object_manager().get(object_id)
-                _apply_destroy_refund(target, object_id, zone_id)
             return bool(objects.system.c_api_destroy_object(zone_id, object_id))
         obj = services.object_manager().get(object_id)
         if obj is None:
