@@ -161,6 +161,63 @@ Travel is a barrier operation. Every participant must acknowledge readiness, loa
 
 Anything else is deferred.
 
+## Sims live-development / hot reload
+
+KerMP has a guarded development mode that keeps the normal compiled
+`KerMP.ts4script` as a stable bootstrap and publishes editable source beside it
+under `Mods/KerMP/Scripts/kermp_mod`.
+
+Start the watcher from the repository:
+
+```powershell
+scripts\devmode.bat
+# equivalent:
+python -m kermp.devsync
+```
+
+The first dev install requires one Sims restart so the stable reload controller
+is loaded. After that, normal edits to the current reloadable boundary
+(`kermp_mod.hooks`) use this loop:
+
+```text
+save source
+→ watcher hashes the tree
+→ full Python 3.7 package build must succeed
+→ changed sources are atomically published
+→ in Sims console: kermp.reload
+→ bridge dispatch pauses
+→ module namespace is transactionally refreshed
+→ hooks are rebound and health checked
+→ queued bridge messages resume
+```
+
+Useful in-game commands:
+
+```text
+kermp.reload
+kermp.reload hooks
+kermp.reload.status
+kermp.reload.health
+kermp.reload.all
+```
+
+The watcher uses content hashes rather than timestamps, debounces editor save
+bursts, removes stale deleted source files, publishes a generation manifest
+last, and refuses to expose a new source generation unless the existing Python
+3.7 build pipeline succeeds. Reload is refused during travel, travel buffering,
+an active Build/Buy capture, or remote Build/Buy application.
+
+Stable bootstrap files intentionally require a game restart when changed:
+`__init__.py`, `bridge_client.py`, `runtime_state.py`, `reload_core.py`,
+`dev_reload.py`, `commands.py`, and `build_adapter.py`. The watcher reports
+these explicitly instead of pretending they were hot-reloaded. Future game
+logic modules may opt in with `__kermp_hot_reload__ = True` once their
+lifecycle is reload-safe.
+
+A normal release build exits the loose-source overlay by removing
+`Mods/KerMP/Scripts`. Stop the dev watcher before running a release build;
+`build.py` fails closed if the watcher lock is active.
+
 ## Sims script packaging note
 
 Current community tooling still targets The Sims 4's embedded Python 3.7 bytecode, and modern game builds require precompiled `.pyc` inside `.ts4script`; raw `.py` is not a reliable install path. `sims_mod_src/build.py` therefore requires Python 3.7 and produces `KerMP.ts4script`.
