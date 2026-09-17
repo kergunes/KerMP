@@ -3,6 +3,7 @@ from pathlib import Path
 from kermp.devsync import (
     MANIFEST_NAME,
     REQUEST_NAME,
+    SourceChangedDuringValidation,
     module_name,
     snapshot_sources,
     sync_once,
@@ -98,3 +99,35 @@ def test_failed_build_never_publishes_new_source(tmp_path):
         raise AssertionError("expected build failure")
 
     assert target.read_text() == "VALUE = 1\n"
+
+
+def test_source_change_during_validation_is_never_published(tmp_path):
+    source = tmp_path / "src"
+    install = tmp_path / "Mods" / "KerMP"
+    _write(source, "hooks.py", "VALUE = 1\n")
+    first = sync_once(install, source_root=source, build_archive=lambda: None, force=True)
+    assert first is not None
+    target = install / "Scripts" / "kermp_mod" / "hooks.py"
+    manifest_path = install / "Scripts" / MANIFEST_NAME
+    assert target.read_text() == "VALUE = 1\n"
+
+    _write(source, "hooks.py", "VALUE = 2\n")
+
+    def save_again_during_build():
+        _write(source, "hooks.py", "VALUE = 3\n")
+
+    try:
+        sync_once(install, source_root=source, build_archive=save_again_during_build)
+    except SourceChangedDuringValidation:
+        pass
+    else:
+        raise AssertionError("expected SourceChangedDuringValidation")
+
+    import json
+    assert target.read_text() == "VALUE = 1\n"
+    assert json.loads(manifest_path.read_text())["generation"] == 1
+
+    second = sync_once(install, source_root=source, build_archive=lambda: None)
+    assert second is not None
+    assert second.generation == 2
+    assert target.read_text() == "VALUE = 3\n"
