@@ -370,6 +370,41 @@ def test_client_aop_player_entrypoint_is_captured_without_local_execute():
         assert hooks.aop_status()['user_seen'] == 1
 
 
+def test_position_proxy_with_numeric_id_is_not_sent_as_world_object():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        proxy = types.SimpleNamespace(id=14982,
+                                      position=types.SimpleNamespace(x=1, y=2, z=3))
+        sandbox.services.object_manager = lambda: types.SimpleNamespace(get=lambda _id: None)
+        descriptor = hooks._classify_interaction_target(proxy, types.SimpleNamespace(pick=None))
+        assert descriptor['target_kind'] == 'position'
+        assert descriptor['target_id'] == '0'
+        assert descriptor['position']['translation'] == [1.0, 2.0, 3.0]
+
+
+def test_managed_object_and_sim_targets_have_distinct_descriptors():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        obj = types.SimpleNamespace(id=42)
+        sandbox.services.object_manager = lambda: types.SimpleNamespace(get=lambda object_id: obj if object_id == 42 else None)
+        object_descriptor = hooks._classify_interaction_target(obj, types.SimpleNamespace(pick=None))
+        assert object_descriptor['target_kind'] == 'object'
+        assert object_descriptor['target_id'] == '42'
+        sim_target = types.SimpleNamespace(id=77, sim_info=types.SimpleNamespace(id=77))
+        sim_descriptor = hooks._classify_interaction_target(sim_target, types.SimpleNamespace(pick=None))
+        assert sim_descriptor['target_kind'] == 'sim'
+        assert sim_descriptor['target_sim_id'] == '77'
+
+
+def test_unknown_temporary_target_fails_closed():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        sandbox.services.object_manager = lambda: types.SimpleNamespace(get=lambda _id: None)
+        descriptor = hooks._classify_interaction_target(types.SimpleNamespace(id=900),
+                                                         types.SimpleNamespace(pick=None))
+        assert descriptor['target_kind'] == 'unknown'
+
+
 def test_host_interaction_executes_locally():
     with HooksSandbox() as sandbox:
         hooks = sandbox.hooks

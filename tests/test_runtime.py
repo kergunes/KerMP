@@ -216,7 +216,12 @@ def test_host_validation_preserves_client_interaction_intent():
     session.select_sim('c', '77')
     request = session.validate_interaction('r1', 'c', {
         'sim_id': '77', 'affordance_id': '123', 'target_id': '0',
+        'target_kind': 'position', 'target_type': 'terrain.Proxy',
         'position': {'translation': [1.0, 2.0, 3.0]},
+        'pick': {'translation': [1.0, 2.0, 3.0]},
         'interaction_kwargs': {'picked_object_ids': [9]}})
+    assert request['target_kind'] == 'position'
+    assert request['target_type'] == 'terrain.Proxy'
     assert request['position']['translation'] == [1.0, 2.0, 3.0]
+    assert request['pick']['translation'] == [1.0, 2.0, 3.0]
     assert request['interaction_kwargs'] == {'picked_object_ids': [9]}

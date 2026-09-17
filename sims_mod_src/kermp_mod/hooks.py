@@ -70,7 +70,9 @@ _clock_status = {'installed': False, 'requests': 0, 'applied': 0, 'last_error': 
 _aop_interception_installed = False
 _aop_stats = {'seen': 0, 'user_seen': 0, 'forwarded': 0, 'last_entrypoint': None,
               'last_source': None, 'last_affordance': None, 'last_target': None,
-              'last_sim': None, 'last_error': None}
+              'last_sim': None, 'last_target_kind': None, 'last_target_type': None,
+              'last_target_local_object': None, 'last_position_present': False,
+              'last_pick_present': False, 'last_error': None}
 _interaction_stats = {'forwarded': 0, 'dropped': 0, 'last_affordance_id': None,
                       'last_target_id': None, 'last_sim_id': None, 'last_error': None,
                       'sent': 0, 'accepted': 0, 'rejected': 0, 'started': 0,
@@ -372,25 +374,70 @@ def _client_enqueue_result():
         return None
 
 
+def _interaction_target_position(value):
+    candidate = _serialize_transform(value)
+    if isinstance(candidate, dict) and candidate.get('translation') is not None:
+        return candidate
+    return None
+
+
+def _interaction_target_type(value):
+    if value is None:
+        return 'NoneType'
+    return '%s.%s' % (type(value).__module__, type(value).__name__)
+
+
+def _managed_object_id(target, target_id):
+    if target_id is None:
+        return None
+    try:
+        import services
+        resolved = services.object_manager().get(int(target_id))
+        return int(target_id) if resolved is target else None
+    except Exception:
+        return None
+
+
+def _classify_interaction_target(target, context):
+    """Produce a cross-process target descriptor from the real client AOP."""
+    target_id = _coerce_id(target)
+    target_type = _interaction_target_type(target)
+    pick = getattr(context, 'pick', None) if context is not None else None
+    target_position = _interaction_target_position(target)
+    pick_position = _interaction_target_position(pick)
+    sim_info = getattr(target, 'sim_info', None)
+    sim_id = _coerce_id(sim_info)
+    if sim_id is None and callable(getattr(target, 'get_sim_instance', None)):
+        sim_id = _coerce_id(target)
+    if sim_id is not None and (sim_info is not None or callable(getattr(target, 'get_sim_instance', None))):
+        return {'target_kind': 'sim', 'target_id': '0', 'target_sim_id': str(sim_id),
+                'target_type': target_type, 'target_local_object': False,
+                'position': target_position or pick_position, 'pick': pick_position}
+    managed_id = _managed_object_id(target, target_id)
+    if managed_id is not None:
+        return {'target_kind': 'object', 'target_id': str(managed_id), 'target_sim_id': None,
+                'target_type': target_type, 'target_local_object': True,
+                'position': target_position or pick_position, 'pick': pick_position}
+    if target_position is not None or pick_position is not None:
+        return {'target_kind': 'position', 'target_id': '0', 'target_sim_id': None,
+                'target_type': target_type, 'target_local_object': False,
+                # UI pick carries routing-surface information for terrain clicks;
+                # prefer it over a proxy's bare position when both are available.
+                'position': pick_position or target_position, 'pick': pick_position}
+    return {'target_kind': 'unknown', 'target_id': '0', 'target_sim_id': None,
+            'target_type': target_type, 'target_local_object': False,
+            'position': None, 'pick': None}
+
+
 def _aop_request(aop, context, kwargs):
     target = getattr(aop, 'target', None)
     affordance = getattr(aop, 'affordance', None)
     sim = getattr(context, 'sim', None) if context is not None else None
     sim_id = _coerce_id(getattr(sim, 'sim_info', None)) or _coerce_id(sim)
-    target_id = _coerce_id(target)
+    target_descriptor = _classify_interaction_target(target, context)
     affordance_id = _coerce_id(affordance)
     if affordance_id is None or sim_id is None:
         raise ValueError('aop_ids_unresolved')
-    position = None
-    if target_id is None:
-        candidate = _serialize_transform(target)
-        if isinstance(candidate, dict) and candidate.get('translation') is not None:
-            position = candidate
-    pick = getattr(context, 'pick', None) if context is not None else None
-    if position is None:
-        candidate = _serialize_transform(pick)
-        if isinstance(candidate, dict) and candidate.get('translation') is not None:
-            position = candidate
     safe_kwargs = {}
     for key, value in dict(getattr(aop, '_kwargs', {}) or {}).items():
         safe = _json_value(value)
@@ -405,18 +452,28 @@ def _aop_request(aop, context, kwargs):
     sent = bridge.emit('interaction.request', {
         'request_id': request_id, 'sim_id': str(sim_id),
         'affordance_id': str(affordance_id),
-        'target_id': str(target_id) if target_id is not None else '0',
-        'position': position, 'interaction_kwargs': safe_kwargs,
+        'target_id': target_descriptor['target_id'],
+        'target_kind': target_descriptor['target_kind'],
+        'target_sim_id': target_descriptor['target_sim_id'],
+        'target_type': target_descriptor['target_type'],
+        'position': target_descriptor['position'], 'pick': target_descriptor['pick'],
+        'interaction_kwargs': safe_kwargs,
     })
     if not sent:
         raise ValueError('bridge_disconnected')
     _interaction_stats['forwarded'] += 1
     _interaction_stats['sent'] += 1
+    _aop_stats['forwarded'] += 1
     _aop_stats['last_affordance'] = affordance_id
-    _aop_stats['last_target'] = target_id
+    _aop_stats['last_target'] = _coerce_id(target)
     _aop_stats['last_sim'] = sim_id
+    _aop_stats['last_target_kind'] = target_descriptor['target_kind']
+    _aop_stats['last_target_type'] = target_descriptor['target_type']
+    _aop_stats['last_target_local_object'] = target_descriptor['target_local_object']
+    _aop_stats['last_position_present'] = target_descriptor['position'] is not None
+    _aop_stats['last_pick_present'] = target_descriptor['pick'] is not None
     _interaction_stats['last_affordance_id'] = affordance_id
-    _interaction_stats['last_target_id'] = target_id
+    _interaction_stats['last_target_id'] = _coerce_id(target)
     _interaction_stats['last_sim_id'] = sim_id
     return _client_enqueue_result()
 
@@ -1292,31 +1349,71 @@ def _install_cancel_interception():
         return False
 
 
+class _InteractionResolutionError(ValueError):
+    def __init__(self, stage, reason):
+        ValueError.__init__(self, reason)
+        self.stage = stage
+
+
 def _resolve_interaction(payload):
     import services
-    sim_id = int(str(payload['sim_id']))
-    info = services.sim_info_manager().get(sim_id)
-    sim = info.get_sim_instance(allow_hidden_flags=True) if info else None
+    try:
+        sim_id = int(str(payload['sim_id']))
+        info = services.sim_info_manager().get(sim_id)
+        sim = info.get_sim_instance(allow_hidden_flags=True) if info else None
+    except Exception as exc:
+        raise _InteractionResolutionError('resolve_sim', '%s: %s' % (type(exc).__name__, exc))
     if sim is None:
-        raise ValueError('sim_not_loaded')
+        raise _InteractionResolutionError('resolve_sim', 'sim_not_loaded')
+    try:
+        affordance_id = int(str(payload['affordance_id']))
+        from sims4.resources import Types
+        affordance = services.get_instance_manager(Types.INTERACTION).get(affordance_id)
+    except Exception as exc:
+        raise _InteractionResolutionError('resolve_affordance', '%s: %s' % (type(exc).__name__, exc))
+    if affordance is None:
+        raise _InteractionResolutionError('resolve_affordance', 'affordance_not_found')
+    target_kind = str(payload.get('target_kind') or 'object')
     target_id = payload.get('target_id')
     target = None
-    if target_id not in (None, '', 0, '0'):
-        target = services.object_manager().get(int(str(target_id)))
+    if target_kind == 'object':
+        try:
+            target = services.object_manager().get(int(str(target_id)))
+        except Exception as exc:
+            raise _InteractionResolutionError('resolve_object_target', '%s: %s' % (type(exc).__name__, exc))
         if target is None:
-            raise ValueError('target_not_found')
-    elif payload.get('position') is not None:
+            raise _InteractionResolutionError('resolve_object_target', 'target_not_found')
+    elif target_kind == 'sim':
+        try:
+            target_info = services.sim_info_manager().get(int(str(payload.get('target_sim_id'))))
+            target = target_info.get_sim_instance(allow_hidden_flags=True) if target_info else None
+        except Exception as exc:
+            raise _InteractionResolutionError('resolve_sim_target', '%s: %s' % (type(exc).__name__, exc))
+        if target is None:
+            raise _InteractionResolutionError('resolve_sim_target', 'target_sim_not_loaded')
+    elif target_kind == 'position':
         target = _deserialize_location(payload.get('position'), None)
         if target is None:
-            raise ValueError('position_target_unavailable')
-    affordance_id = int(str(payload['affordance_id']))
-    from sims4.resources import Types
-    affordance = services.get_instance_manager(Types.INTERACTION).get(affordance_id)
-    if affordance is None:
-        raise ValueError('affordance_not_found')
-    from interactions.context import InteractionContext, InteractionSource
-    from interactions.priority import Priority
-    context = InteractionContext(sim, InteractionSource.SCRIPT, Priority.High)
+            raise _InteractionResolutionError('resolve_position_target', 'position_target_unavailable')
+    elif target_kind != 'none':
+        raise _InteractionResolutionError('classify_target', 'unsupported_target_kind:%s' % target_kind)
+    try:
+        from interactions.context import InteractionContext, InteractionSource
+        from interactions.priority import Priority
+        source = getattr(InteractionSource, 'SOURCE_SCRIPT_WITH_USER_INTENT',
+                         getattr(InteractionSource, 'SCRIPT', None))
+        pick = _deserialize_location(payload.get('pick'), None) if payload.get('pick') else None
+        if pick is None and target_kind == 'position':
+            pick = target
+        context_kwargs = {'pick': pick}
+        if target_kind == 'sim' and payload.get('target_sim_id') is not None:
+            context_kwargs['target_sim_id'] = int(str(payload['target_sim_id']))
+        try:
+            context = InteractionContext(sim, source, Priority.High, **context_kwargs)
+        except TypeError:
+            context = InteractionContext(sim, source, Priority.High)
+    except Exception as exc:
+        raise _InteractionResolutionError('reconstruct_context', '%s: %s' % (type(exc).__name__, exc))
     return sim, affordance, target, context, dict(payload.get('interaction_kwargs') or {})
 
 
@@ -1335,6 +1432,17 @@ def _interaction_request(payload):
                                             'interaction_id': str(getattr(result, 'id', ''))})
         _log('KERMP INTERACTION STARTED request=%s sim=%s affordance=%s target=%s' %
              (request_id, payload.get('sim_id'), payload.get('affordance_id'), payload.get('target_id')))
+    except _InteractionResolutionError as exc:
+        stage = exc.stage
+        reason = '%s:%s' % (stage, exc)
+        _interaction_stats['last_error'] = reason
+        bridge.emit('interaction.rejected', {
+            'request_id': request_id, 'sim_id': payload.get('sim_id'),
+            'affordance_id': payload.get('affordance_id'), 'target_id': payload.get('target_id'),
+            'target_kind': payload.get('target_kind'), 'target_type': payload.get('target_type'),
+            'position_present': payload.get('position') is not None, 'pick_present': payload.get('pick') is not None,
+            'resolve_stage': stage, 'reason': reason})
+        _log('KERMP INTERACTION REJECTED request=%s stage=%s error=%s' % (request_id, stage, exc))
     except Exception as exc:
         reason = '%s:%s: %s' % (stage, type(exc).__name__, exc)
         _interaction_stats['last_error'] = reason
