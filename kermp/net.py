@@ -236,6 +236,18 @@ class KerMPHost:
                 return
             await self.broadcast(MessageType.INTERACTION_ACCEPTED, request, include_host=True)
             return
+        if env.type == MessageType.INTERACTION_COMMAND.value:
+            try:
+                command = dict(env.payload.get("command") or {})
+                request = self.session.validate_interaction(
+                    env.payload.get("request_id"), env.sender_id,
+                    {**env.payload, "affordance_id": command.get("affordance_id")})
+                request["command"] = command
+            except (TypeError, ValueError) as exc:
+                await self._send_error(env.sender_id, str(exc))
+                return
+            await self.broadcast(MessageType.INTERACTION_COMMAND_ACCEPTED, request, include_host=True)
+            return
         if env.type == MessageType.INTERACTION_CANCEL.value:
             try:
                 request_id = env.payload.get("request_id")

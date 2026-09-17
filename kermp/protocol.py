@@ -70,6 +70,11 @@ class MessageType(str, Enum):
     INTERACTION_STARTED = "interaction.started"
     INTERACTION_FINISHED = "interaction.finished"
     INTERACTION_CANCEL = "interaction.cancel"
+    # Native EA command capture. INTERACTION_REQUEST remains the AOP/manual
+    # fallback for inputs whose command arguments are not transportable.
+    INTERACTION_COMMAND = "interaction.command"
+    INTERACTION_COMMAND_ACCEPTED = "interaction.command_accepted"
+    INTERACTION_COMMAND_REJECTED = "interaction.command_rejected"
     GAME_RAW_MESSAGE = "game.raw_message"
 
 

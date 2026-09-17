@@ -128,6 +128,29 @@ class HostRuntime:
             await self.host.broadcast(MessageType.INTERACTION_ACCEPTED, request)
             return
 
+        if event.type == MessageType.INTERACTION_COMMAND.value:
+            payload = dict(event.payload)
+            payload.setdefault('player_id', self.host.player_id)
+            try:
+                command = dict(payload.get('command') or {})
+                request = self.host.session.validate_interaction(
+                    payload.get('request_id'), self.host.player_id,
+                    {**payload, 'affordance_id': command.get('affordance_id')})
+                request['command'] = command
+            except (TypeError, ValueError) as exc:
+                self.bridge.send(MessageType.INTERACTION_COMMAND_REJECTED.value,
+                                 {'request_id': payload.get('request_id'), 'reason': str(exc)})
+                return
+            delivered = self.bridge.send(MessageType.INTERACTION_COMMAND.value, request)
+            if not delivered:
+                failure = dict(request)
+                failure.update({'status': 'rejected', 'resolve_stage': 'host_game_bridge',
+                                'reason': 'host_game_bridge_disconnected'})
+                await self.host.broadcast(MessageType.INTERACTION_COMMAND_REJECTED, failure)
+                return
+            await self.host.broadcast(MessageType.INTERACTION_COMMAND_ACCEPTED, request)
+            return
+
         if event.type == MessageType.INTERACTION_CANCEL.value:
             payload = dict(event.payload)
             try:
@@ -204,6 +227,7 @@ class HostRuntime:
             await self.host.broadcast(MessageType.SIM_STATE, self.host.session.snapshot())
             return
         if event.type in (MessageType.INTERACTION_ACCEPTED.value, MessageType.INTERACTION_REJECTED.value,
+                          MessageType.INTERACTION_COMMAND_ACCEPTED.value, MessageType.INTERACTION_COMMAND_REJECTED.value,
                           MessageType.INTERACTION_STARTED.value, MessageType.INTERACTION_FINISHED.value):
             request_id = str(event.payload.get("request_id") or "")
             if request_id in self.host.session.interaction_requests:
@@ -239,10 +263,18 @@ class HostRuntime:
                 failure.update({'status': 'rejected', 'resolve_stage': 'host_game_bridge',
                                 'reason': 'host_game_bridge_disconnected'})
                 await self.host.broadcast(MessageType.INTERACTION_REJECTED, failure)
+        elif env.type == MessageType.INTERACTION_COMMAND_ACCEPTED.value:
+            delivered = self.bridge.send(MessageType.INTERACTION_COMMAND.value, env.payload)
+            if not delivered:
+                failure = dict(env.payload)
+                failure.update({'status': 'rejected', 'resolve_stage': 'host_game_bridge',
+                                'reason': 'host_game_bridge_disconnected'})
+                await self.host.broadcast(MessageType.INTERACTION_COMMAND_REJECTED, failure)
         elif env.type == MessageType.INTERACTION_CANCEL.value:
             self.bridge.send(MessageType.INTERACTION_CANCEL.value, env.payload)
         elif env.type in (MessageType.INTERACTION_REJECTED.value, MessageType.INTERACTION_STARTED.value,
-                          MessageType.INTERACTION_FINISHED.value, MessageType.ERROR.value):
+                          MessageType.INTERACTION_FINISHED.value, MessageType.INTERACTION_COMMAND_REJECTED.value,
+                          MessageType.ERROR.value):
             self.bridge.send(env.type, env.payload)
 
     async def _start_travel(self, payload: dict, requested_by: str) -> None:
@@ -372,6 +404,9 @@ class ClientRuntime:
         if event.type == MessageType.INTERACTION_REQUEST.value:
             await self.client.send(MessageType.INTERACTION_REQUEST, event.payload)
             return
+        if event.type == MessageType.INTERACTION_COMMAND.value:
+            await self.client.send(MessageType.INTERACTION_COMMAND, event.payload)
+            return
         if event.type == MessageType.INTERACTION_CANCEL.value:
             await self.client.send(MessageType.INTERACTION_CANCEL, event.payload)
             return
@@ -496,6 +531,7 @@ class ClientRuntime:
             self.bridge.send(MessageType.CLOCK_STATE.value, env.payload)
         elif env.type in (MessageType.SIM_STATE.value, MessageType.SIM_SELECTION_STATE.value,
                           MessageType.INTERACTION_ACCEPTED.value, MessageType.INTERACTION_REJECTED.value,
+                          MessageType.INTERACTION_COMMAND_ACCEPTED.value, MessageType.INTERACTION_COMMAND_REJECTED.value,
                           MessageType.INTERACTION_STARTED.value, MessageType.INTERACTION_FINISHED.value,
                           MessageType.INTERACTION_CANCEL.value):
             self.bridge.send(env.type, env.payload)

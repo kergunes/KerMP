@@ -66,6 +66,7 @@ def kermp_play_status(_connection=None):
     aop = hooks.aop_status()
     cap = hooks.message_capture_status()
     inter = hooks.interaction_status()
+    command = hooks.command_status()
     zone_id = 0
     try:
         zone_id = services.current_zone_id()
@@ -102,6 +103,12 @@ def kermp_play_status(_connection=None):
          inter.get('apply_accepted'), inter.get('apply_rejected'), inter.get('rejected'), inter.get('started'),
          inter.get('last_affordance_id'), inter.get('last_target_id'), inter.get('last_sim_id'),
          (inter.get('last_error') or 'none').splitlines()[0] if inter.get('last_error') else 'none'))
+    out('NATIVE_COMMAND installed=%s captured=%s forwarded=%s fallback=%s replayed=%s rejected=%s remote_clients=%s last_command=%s last_player=%s remote_client_id=%s error=%s' %
+        (command.get('installed'), command.get('captured'), command.get('forwarded'), command.get('fallback'),
+         command.get('replayed'), command.get('rejected'), command.get('remote_clients'),
+         command.get('last_command') or 'none', command.get('last_player_id') or 'none',
+         command.get('last_remote_client_id') or 'none',
+         (command.get('last_error') or 'none').splitlines()[0] if command.get('last_error') else 'none'))
     out('RX view_updates_received=%s TX view_updates_sent=%s' %
         (getattr(hooks, '_view_updates_received', 0), getattr(hooks, '_view_updates_sent', 0)))
     out('LOCAL_ACTIVE_SIM=%s' % (hooks._active_sim_id() or 'none'))

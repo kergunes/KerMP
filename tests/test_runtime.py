@@ -88,6 +88,44 @@ def test_client_roster_is_forwarded_before_automatic_selection():
     asyncio.run(run())
 
 
+def test_client_native_command_is_forwarded_without_reclassifying_payload():
+    async def run():
+        client = KerMPClient('p2', 'Player2', '127.0.0.1', 0)
+        rt = ClientRuntime(client, bridge_port=0)
+        sent = []
+
+        async def fake_send(typ, payload=None):
+            sent.append((typ, payload or {}))
+
+        client.send = fake_send
+        payload = {'request_id': 'native-1', 'sim_id': '2',
+                   'command': {'name': 'interactions.push', 'affordance_id': '123'}}
+        await rt._on_game_event(BridgeEvent(MessageType.INTERACTION_COMMAND.value, payload))
+        assert sent == [(MessageType.INTERACTION_COMMAND, payload)]
+    asyncio.run(run())
+
+
+def test_host_validates_and_broadcasts_native_command_for_owned_sim():
+    async def run():
+        host = KerMPHost('h', 'Host', '127.0.0.1', 0)
+        host.session.add_player('p2', 'Player2')
+        host.session.update_sims([{'sim_id': '2', 'name': 'Bob'}])
+        host.session.select_sim('p2', '2')
+        broadcast = []
+
+        async def fake_broadcast(typ, payload=None, include_host=False):
+            broadcast.append((typ, payload, include_host))
+
+        host.broadcast = fake_broadcast
+        await host._dispatch(Envelope.make(MessageType.INTERACTION_COMMAND, {
+            'request_id': 'native-2', 'sim_id': '2',
+            'command': {'name': 'interactions.push', 'affordance_id': '123'}}, 'p2'))
+        assert broadcast[0][0] == MessageType.INTERACTION_COMMAND_ACCEPTED
+        assert broadcast[0][1]['command']['name'] == 'interactions.push'
+        assert broadcast[0][1]['player_id'] == 'p2'
+    asyncio.run(run())
+
+
 def test_runtime_handshake_without_game_bridge_client():
     async def run():
         host = KerMPHost("h", "Host", "127.0.0.1", 0)

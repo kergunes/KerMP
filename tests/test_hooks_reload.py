@@ -481,6 +481,37 @@ def test_client_interaction_unresolvable_affordance_is_dropped():
         assert hooks.interaction_status()['dropped'] == 1
 
 
+def test_native_push_capture_forwards_typed_object_command_without_aop_fallback():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        hooks._sidecar_role = 'client'
+        argument_helpers = types.ModuleType('server_commands.argument_helpers')
+        server_commands = types.ModuleType('server_commands')
+        server_commands.__path__ = []
+        sandbox._register('server_commands', server_commands)
+        sandbox._register('server_commands.argument_helpers', argument_helpers)
+        server_commands.argument_helpers = argument_helpers
+
+        sim = sandbox.sim_mod.Sim()
+        target = types.SimpleNamespace(id=88)
+        sandbox.services.object_manager = lambda: types.SimpleNamespace(get=lambda object_id: target if object_id == 88 else None)
+        argument_helpers.get_optional_target = lambda opt_sim, connection, notify_failure=False: sim
+        affordance = types.SimpleNamespace(guid64=123)
+        opt_target = types.SimpleNamespace(get_target=lambda: target)
+        emitted = []
+        hooks.bridge.emit = lambda name, payload: emitted.append((name, payload)) or True
+
+        result = hooks._capture_native_push('interactions.push', lambda *args: 'fallback',
+                                            affordance, opt_target, object(), 'High', 'SOURCE_PIE_MENU', 7)
+        assert result.test_result is True
+        assert emitted[0][0] == 'interaction.command'
+        command = emitted[0][1]['command']
+        assert command['name'] == 'interactions.push'
+        assert command['affordance_id'] == '123'
+        assert command['target']['target_kind'] == 'object'
+        assert hooks.command_status()['fallback'] == 0
+
+
 def test_active_sim_is_published_once_after_roster_is_available():
     with HooksSandbox() as sandbox:
         hooks = sandbox.hooks
