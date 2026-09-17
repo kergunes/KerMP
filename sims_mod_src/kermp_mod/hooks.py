@@ -635,6 +635,48 @@ def _capture_native_cancel(command_name, original, args, connection):
     return None
 
 
+def _wire_pick_type(value):
+    name = getattr(value, 'name', None)
+    if name:
+        return str(name)
+    try:
+        return int(value)
+    except Exception:
+        return _command_value(value, 0)
+
+
+def _capture_native_choice(command_name, original, values, connection, delegate_locally):
+    """Mirror pie-menu lifecycle calls so host owns the eventual selection.
+
+    ``has_choices`` and ``choices`` must run first on the host virtual Client:
+    they populate its private ChoiceMenu.  ``select`` can then use the original
+    EA handler and its own terrain PickInfo rather than any KerMP TerrainPoint
+    reconstruction.
+    """
+    _command_stats['captured'] += 1
+    _command_stats['last_command'] = command_name
+    try:
+        import services
+        client = services.client_manager().get(connection)
+        sim = getattr(client, 'active_sim', None) if client is not None else None
+        sim_id = _coerce_id(getattr(sim, 'sim_info', None)) or _coerce_id(sim)
+        if sim_id is None:
+            raise ValueError('active_sim_unresolved')
+        command = {'name': command_name, 'affordance_id': 'native.choice', 'args': list(values)}
+        request_id = 'command-%s' % __import__('uuid').uuid4().hex
+        sent = bridge.emit('interaction.command', {'request_id': request_id, 'sim_id': str(sim_id),
+                                                   'command': command})
+        if not sent:
+            raise ValueError('bridge_disconnected')
+        _interaction_request_by_id[request_id] = {'sim_id': str(sim_id), 'command': command_name}
+        _command_stats['forwarded'] += 1
+        return original(*values, connection) if delegate_locally else None
+    except Exception as exc:
+        _command_stats['last_error'] = '%s: %s' % (type(exc).__name__, exc)
+        _command_stats['fallback'] += 1
+        return original(*values, connection)
+
+
 def _install_native_command_proxy():
     """Register typed wrappers at the EA command registry, reversibly.
 
@@ -694,11 +736,56 @@ def _install_native_command_proxy():
             commands.Command(name, command_type=command_type)(wrapped)
             _command_registry_patches.append((name, original, command_type))
 
+        def has_choices(target_id, pick_type, x=0.0, y=0.0, z=0.0, lot_id=0, level=0,
+                        control=0, alt=0, shift=0, reference_id=0, is_routable=True, _connection=None):
+            values = [int(target_id), _wire_pick_type(pick_type), float(x), float(y), float(z), int(lot_id),
+                      int(level), int(control), int(alt), int(shift), int(reference_id), bool(is_routable)]
+            if _sidecar_role != 'client':
+                return interaction_commands.has_choices(*values, _connection)
+            return _capture_native_choice('interactions.has_choices', interaction_commands.has_choices,
+                                          values, _connection, True)
+        has_choices.__annotations__ = {'target_id': int, 'pick_type': interaction_commands.PickType,
+                                       'x': float, 'y': float, 'z': float, 'lot_id': int, 'level': int,
+                                       'control': int, 'alt': int, 'shift': int, 'reference_id': int,
+                                       'is_routable': bool}
+
+        def choices(target_id, pick_type, x=0.0, y=0.0, z=0.0, lot_id=0, level=0, control=0,
+                    alt=0, shift=0, reference_id=0, referred_object_id=0, preferred_object_id=0,
+                    is_routable=True, _connection=None):
+            values = [int(target_id), _wire_pick_type(pick_type), float(x), float(y), float(z), int(lot_id),
+                      int(level), int(control), int(alt), int(shift), int(reference_id), int(referred_object_id),
+                      int(preferred_object_id), bool(is_routable)]
+            if _sidecar_role != 'client':
+                return interaction_commands.generate_choices(*values, _connection)
+            return _capture_native_choice('interactions.choices', interaction_commands.generate_choices,
+                                          values, _connection, True)
+        choices.__annotations__ = {'target_id': int, 'pick_type': interaction_commands.PickType,
+                                   'x': float, 'y': float, 'z': float, 'lot_id': int, 'level': int,
+                                   'control': int, 'alt': int, 'shift': int, 'reference_id': int,
+                                   'referred_object_id': int, 'preferred_object_id': int, 'is_routable': bool}
+
+        def select(choice_id, reference_id=0, _connection=None):
+            values = [int(choice_id), int(reference_id)]
+            if _sidecar_role != 'client':
+                return interaction_commands.select_choice(*values, _connection)
+            return _capture_native_choice('interactions.select', interaction_commands.select_choice,
+                                          values, _connection, False)
+        select.__annotations__ = {'choice_id': int, 'reference_id': int}
+
         register_push('interactions.push', interaction_commands.push_interaction, RequiredTargetParam)
         register_push('interactions.push_targeting_sim_info',
                       interaction_commands.push_targeting_sim_info, OptionalSimInfoParam)
         register_cancel_si('interactions.cancel_si', interaction_commands.cancel_super_interaction)
         register_cancel_mixer('interactions.cancel', interaction_commands.cancel_mixer_interaction)
+        commands.unregister('interactions.has_choices')
+        commands.Command('interactions.has_choices', command_type=command_type)(has_choices)
+        _command_registry_patches.append(('interactions.has_choices', interaction_commands.has_choices, command_type))
+        commands.unregister('interactions.choices')
+        commands.Command('interactions.choices', command_type=command_type)(choices)
+        _command_registry_patches.append(('interactions.choices', interaction_commands.generate_choices, command_type))
+        commands.unregister('interactions.select')
+        commands.Command('interactions.select', command_type=command_type)(select)
+        _command_registry_patches.append(('interactions.select', interaction_commands.select_choice, command_type))
         _command_proxy_installed = True
         _command_stats['installed'] = True
         _command_stats['last_error'] = None
@@ -821,6 +908,17 @@ def _native_interaction_source(value):
     return getattr(InteractionContext, str(value), InteractionContext.SOURCE_PIE_MENU)
 
 
+def _native_pick_type(value, interaction_commands):
+    pick_type = interaction_commands.PickType
+    named = getattr(pick_type, str(value), None)
+    if named is not None:
+        return named
+    try:
+        return pick_type(int(value))
+    except Exception:
+        return getattr(pick_type, str(value), pick_type.PICK_TERRAIN)
+
+
 def _interaction_command(payload):
     """Replay an accepted typed command through its current EA handler."""
     if _sidecar_role != 'host':
@@ -842,7 +940,27 @@ def _interaction_command(payload):
         remote_client = _remote_client_for(payload.get('player_id'), sim)
         connection = remote_client.id
         name = command.get('name')
-        if name == 'interactions.push':
+        if name == 'interactions.has_choices':
+            args = list(command.get('args') or [])
+            if len(args) != 12:
+                raise ValueError('has_choices_args_invalid')
+            args[1] = _native_pick_type(args[1], interaction_commands)
+            interaction_commands.has_choices(*args, connection)
+            result = True
+        elif name == 'interactions.choices':
+            args = list(command.get('args') or [])
+            if len(args) != 14:
+                raise ValueError('choices_args_invalid')
+            args[1] = _native_pick_type(args[1], interaction_commands)
+            interaction_commands.generate_choices(*args, connection)
+            result = True
+        elif name == 'interactions.select':
+            args = list(command.get('args') or [])
+            if len(args) != 2:
+                raise ValueError('select_args_invalid')
+            interaction_commands.select_choice(int(args[0]), int(args[1]), connection)
+            result = True
+        elif name == 'interactions.push':
             target = dict(command.get('target') or {})
             target_id = target.get('target_id') or target.get('target_sim_id')
             if not target_id:

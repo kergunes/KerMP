@@ -512,6 +512,24 @@ def test_native_push_capture_forwards_typed_object_command_without_aop_fallback(
         assert hooks.command_status()['fallback'] == 0
 
 
+def test_native_choice_capture_preserves_pick_arguments_for_host_replay():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        hooks._sidecar_role = 'client'
+        sim = sandbox.sim_mod.Sim()
+        sandbox.services.client_manager = lambda: types.SimpleNamespace(
+            get=lambda connection: types.SimpleNamespace(active_sim=sim))
+        emitted = []
+        hooks.bridge.emit = lambda name, payload: emitted.append((name, payload)) or True
+
+        assert hooks._capture_native_choice('interactions.choices', lambda *args: 'local',
+                                            [0, 'PICK_TERRAIN', 1.0, 2.0, 3.0], 7, True) == 'local'
+        command = emitted[0][1]['command']
+        assert command['name'] == 'interactions.choices'
+        assert command['args'][1] == 'PICK_TERRAIN'
+        assert emitted[0][1]['sim_id'] == '77'
+
+
 def test_active_sim_is_published_once_after_roster_is_available():
     with HooksSandbox() as sandbox:
         hooks = sandbox.hooks
