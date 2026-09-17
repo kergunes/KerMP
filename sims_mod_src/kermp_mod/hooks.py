@@ -69,7 +69,9 @@ _clock_apply_bypass = False
 _clock_status = {'installed': False, 'requests': 0, 'applied': 0, 'last_error': None}
 _interaction_stats = {'forwarded': 0, 'dropped': 0, 'last_affordance_id': None,
                       'last_target_id': None, 'last_sim_id': None, 'last_error': None,
-                      'sent': 0, 'accepted': 0, 'rejected': 0, 'started': 0}
+                      'sent': 0, 'accepted': 0, 'rejected': 0, 'started': 0,
+                      'delivered': 0, 'apply_accepted': 0, 'apply_rejected': 0,
+                      'last_request_id': None}
 
 
 def _record_patch(target, attr, original):
@@ -977,10 +979,14 @@ def _interaction_accepted(_payload):
 def _interaction_rejected(payload):
     _interaction_stats['rejected'] += 1
     _interaction_stats['last_error'] = str((payload or {}).get('reason') or 'rejected')
+    if _sidecar_role == 'host':
+        _interaction_stats['apply_rejected'] += 1
 
 
 def _interaction_started(payload):
     _interaction_stats['started'] += 1
+    if _sidecar_role == 'host':
+        _interaction_stats['apply_accepted'] += 1
     payload = payload or {}
     request_id = str(payload.get('request_id') or '')
     interaction_id = payload.get('interaction_id')
@@ -1166,6 +1172,8 @@ def _resolve_interaction(payload):
 
 def _interaction_request(payload):
     request_id = str(payload.get('request_id') or '')
+    _interaction_stats['delivered'] += 1
+    _interaction_stats['last_request_id'] = request_id
     try:
         sim, affordance, target, context = _resolve_interaction(payload)
         result = sim.push_super_affordance(affordance, target, context)

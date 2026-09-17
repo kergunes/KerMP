@@ -88,8 +88,9 @@ def kermp_play_status(_connection=None):
         (getattr(hooks, '_game_message_capture_installed', False), cap.get('observed'),
          cap.get('replicated'), cap.get('dropped_local'), cap.get('dropped_local_ops'),
          (cap.get('last_error') or 'none').splitlines()[0] if cap.get('last_error') else 'none'))
-    out('INTERACTION intercepted=%s sent=%s accepted=%s rejected=%s started=%s last_affordance=%s last_target=%s last_sim=%s error=%s' %
-        (inter.get('forwarded'), inter.get('sent'), inter.get('accepted'), inter.get('rejected'), inter.get('started'),
+    out('INTERACTION intercepted=%s sent=%s accepted=%s delivered=%s apply_accepted=%s apply_rejected=%s rejected=%s started=%s last_affordance=%s last_target=%s last_sim=%s error=%s' %
+        (inter.get('forwarded'), inter.get('sent'), inter.get('accepted'), inter.get('delivered'),
+         inter.get('apply_accepted'), inter.get('apply_rejected'), inter.get('rejected'), inter.get('started'),
          inter.get('last_affordance_id'), inter.get('last_target_id'), inter.get('last_sim_id'),
          (inter.get('last_error') or 'none').splitlines()[0] if inter.get('last_error') else 'none'))
     out('RX view_updates_received=%s TX view_updates_sent=%s' %

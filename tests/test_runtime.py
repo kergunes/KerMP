@@ -193,3 +193,17 @@ def test_host_build_operation_not_echoed_back():
         assert MessageType.BUILD_APPLY in broadcast
         assert MessageType.BUILD_APPLY not in bridge_sent
     asyncio.run(run())
+
+
+def test_host_acceptance_is_delivered_to_local_game_for_apply():
+    async def run():
+        host = KerMPHost('h', 'Host', '127.0.0.1', 0)
+        rt = HostRuntime(host, bridge_port=0)
+        delivered = []
+        rt.bridge.send = lambda typ, payload=None: (delivered.append((typ, payload)), True)[1]
+        env = Envelope.make(MessageType.INTERACTION_ACCEPTED, {
+            'request_id': 'local-r1', 'player_id': 'c', 'sim_id': '77',
+            'affordance_id': '123', 'target_id': '7', 'status': 'accepted'}, 'h')
+        await rt._on_network_message(env)
+        assert delivered == [(MessageType.INTERACTION_REQUEST.value, env.payload)]
+    asyncio.run(run())
