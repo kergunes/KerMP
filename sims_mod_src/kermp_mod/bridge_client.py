@@ -42,6 +42,16 @@ class KerMPBridgeClient(object):
         t.daemon = True
         t.start()
 
+    def stop(self):
+        """Signal the reader thread to exit and close the socket."""
+        self._stop = True
+        try:
+            if self.sock:
+                self.sock.close()
+        except Exception:
+            pass
+        self.sock = None
+
     def on(self, event_type, handler):
         self.handlers[event_type] = handler
 

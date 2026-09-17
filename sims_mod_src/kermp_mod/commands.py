@@ -6,7 +6,7 @@ import services
 from . import hooks
 from .hooks import (bridge, probe_wall_contours, wall_event_probe, enumerate_sims,
                     enumerate_objects, enumerate_affordances, inspect_distributor_boundary)
-from .hooks import _serialize_transform
+from .hooks import _serialize_transform, _object_value, _object_household_id
 from .build_adapter import adapter, build_buy_surface
 
 
@@ -195,6 +195,8 @@ def _inspect_object_lines(obj):
         'name=%s' % _inspect_value(name),
         'type=%s' % type(obj).__name__,
         'scale=%s' % _inspect_attr(obj, 'scale'),
+        'value=%s' % _inspect_value(_object_value(obj)),
+        'household_id=%s' % _inspect_value(_object_household_id(obj)),
         'position=%s' % ','.join(str(item) for item in position),
         'orientation=%s' % ','.join(str(item) for item in orientation),
         'parent_id=%s' % parent_id,

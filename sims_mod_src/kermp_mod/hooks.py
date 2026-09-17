@@ -44,6 +44,11 @@ _build_capture_depth = 0
 _simulation_status = {'role': 'unknown', 'timeline_suppression_available': False,
                       'installed': False, 'local_simulation_enabled': True,
                       'clock_source': 'local', 'last_error': 'sidecar_not_connected'}
+_patches = []
+
+
+def _record_patch(target, attr, original):
+    _patches.append((target, attr, original))
 
 
 def _log(message):
@@ -87,6 +92,46 @@ def install():
     _install_game_message_capture()
     _install_travel_hook()
     _log('KerMP installed')
+
+
+def teardown():
+    """Restore patched originals and stop the bridge before a hot reload.
+
+    A hot reload re-executes this module in a fresh namespace. Without a
+    teardown, previously monkey-patched game functions keep pointing at stale
+    closures and the old bridge socket is orphaned.
+    """
+    global _installed
+    for target, attr, original in _patches:
+        try:
+            setattr(target, attr, original)
+        except Exception:
+            _log('KERMP TEARDOWN restore failed target=%s attr=%s' %
+                 (type(target).__name__, attr))
+    del _patches[:]
+    _teardown_build_buy_callbacks()
+    _installed = False
+    try:
+        bridge.stop()
+    except Exception:
+        pass
+
+
+def _teardown_build_buy_callbacks():
+    """Best-effort unregister of Build/Buy lifecycle callbacks."""
+    try:
+        import build_buy
+    except Exception:
+        return
+    for unregister_name, callback in (
+            ('unregister_build_buy_enter_callback', _on_build_buy_enter),
+            ('unregister_build_buy_exit_callback', _on_build_buy_exit)):
+        unregister = getattr(build_buy, unregister_name, None)
+        if callable(unregister):
+            try:
+                unregister(callback)
+            except Exception:
+                pass
 
 
 def _sidecar_welcome(payload):
@@ -191,6 +236,7 @@ def _install_game_message_capture():
         wrapped._kermp_wrapped = True
         wrapped._kermp_original = original
         Client.send_message = wrapped
+        _record_patch(Client, 'send_message', original)
         _game_message_capture_installed = True
         _log('KERMP DISTRIBUTOR CAPTURE installed Client.send_message')
         return True
@@ -720,6 +766,7 @@ def _install_travel_hook():
         wrapped._kermp_wrapped = True
         wrapped._kermp_original = original
         travel_commands.travel_sims_to_zone = wrapped
+        _record_patch(travel_commands, 'travel_sims_to_zone', original)
         _log('KERMP natural travel hook installed signature=%s' % inspect.signature(original))
         return True
     except Exception as exc:
@@ -989,6 +1036,7 @@ def _install_wrapper(label, factory):
         wrapped._kermp_wrapped = True
         wrapped._kermp_original = original
         setattr(target, attr, wrapped)
+        _record_patch(target, attr, original)
         _build_hook_info[label]['installed'] = True
         return True
     except Exception as exc:
@@ -1243,6 +1291,78 @@ def build_object_status():
             'last_error': _build_last_error}
 
 
+def _object_value(obj):
+    """Best-effort object sell value; fails closed to None."""
+    if obj is None:
+        return None
+    for name in ('current_value', 'catalog_value', 'price'):
+        try:
+            value = getattr(obj, name, None)
+        except Exception:
+            continue
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                continue
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
+    return None
+
+
+def _object_household_id(obj):
+    if obj is None:
+        return None
+    getter = getattr(obj, 'get_household_owner_id', None)
+    if callable(getter):
+        try:
+            household_id = getter()
+        except Exception:
+            household_id = None
+        if household_id not in (None, 0):
+            return int(household_id)
+    household_id = getattr(obj, 'household_owner_id', None)
+    if household_id in (None, 0):
+        return None
+    try:
+        return int(household_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sell_funds_reason():
+    try:
+        from protocolbuffers import Consts_pb2
+    except Exception:
+        return 0
+    for name in ('TELEMETRY_MONEY_SELL_OBJECT', 'TELEMETRY_MONEY_BUILD_BUY',
+                 'TELEMETRY_MONEY_BUILD', 'TELEMETRY_MONEY_CHEAT'):
+        reason = getattr(Consts_pb2, name, None)
+        if isinstance(reason, int):
+            return reason
+    return 0
+
+
+def _apply_destroy_refund(obj, object_id, zone_id):
+    """Refund a sold object's value to its household. Host-authoritative only."""
+    value = _object_value(obj)
+    household_id = _object_household_id(obj)
+    if not value or household_id is None:
+        _log('KERMP DESTROY REFUND skipped object_id=%s value=%s household_id=%s' %
+             (object_id, value, household_id))
+        return False
+    try:
+        import build_buy
+        result = build_buy.c_api_modify_household_funds(
+            value, household_id, _sell_funds_reason(), zone_id)
+        _log('KERMP DESTROY REFUND object_id=%s value=%s household_id=%s result=%s' %
+             (object_id, value, household_id, result))
+        return bool(result)
+    except Exception as exc:
+        _log('KERMP DESTROY REFUND ERROR %s: %s' % (type(exc).__name__, exc))
+        return False
+
+
 def _apply_object_operation(operation):
     """Apply only operations whose current-build Python object API is explicit."""
     global _build_last_error
@@ -1269,6 +1389,9 @@ def _apply_object_operation(operation):
             return True
         if op == 'object.destroy':
             import objects.system
+            if _sidecar_role == 'host':
+                target = services.object_manager().get(object_id)
+                _apply_destroy_refund(target, object_id, zone_id)
             return bool(objects.system.c_api_destroy_object(zone_id, object_id))
         obj = services.object_manager().get(object_id)
         if obj is None:
@@ -1366,7 +1489,9 @@ def _install_zone_hooks():
         return result
 
     wrapped._kermp_wrapped = True
+    wrapped._kermp_original = original
     Zone.do_zone_spin_up = wrapped
+    _record_patch(Zone, 'do_zone_spin_up', original)
 
 
 def _after_zone_spin_up():

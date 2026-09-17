@@ -21,6 +21,7 @@ def default_install_dir():
 
 INSTALL_DIR = default_install_dir()
 INSTALL_OUT = INSTALL_DIR / OUT.name
+DEV_DIR = INSTALL_DIR / 'Scripts' / 'kermp_mod'
 
 
 def is_py37(exe):
@@ -61,7 +62,30 @@ def find_py37():
     raise RuntimeError('Python 3.7 not found. Set PYTHON37 to python.exe.')
 
 
+def install_dev():
+    """Install loose .py source so in-game hot reload (kermp.reload) works.
+
+    The compiled .ts4script has no reloadable source; dev mode instead drops the
+    package under Mods/KerMP/Scripts/kermp_mod where the game can load and
+    recompile it. The previously installed .ts4script is removed to avoid the
+    mod loading twice.
+    """
+    if INSTALL_OUT.exists():
+        INSTALL_OUT.unlink()
+        print('Removed %s (dev mode uses loose source)' % INSTALL_OUT)
+    for src in SOURCE.rglob('*.py'):
+        rel = src.relative_to(SOURCE)
+        dst = DEV_DIR / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src), str(dst))
+    print('Installed dev source to %s' % DEV_DIR)
+    print('Restart the game once, then hot reload with `kermp.reload`.')
+
+
 def main():
+    if '--dev' in sys.argv:
+        install_dev()
+        return
     py = find_py37()
     with tempfile.TemporaryDirectory() as td:
         work = Path(td)
