@@ -20,9 +20,8 @@ jobs:
 
   sims-python37-syntax:
     runs-on: ubuntu-latest
+    container: python:3.7-slim
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.7"
+      - run: python --version
       - run: python -m compileall -q sims_mod_src/kermp_mod
