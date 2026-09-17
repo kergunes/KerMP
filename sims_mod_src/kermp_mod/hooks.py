@@ -1168,11 +1168,11 @@ def _components(value, count):
 
 
 def _deserialize_transform(data, fallback=None):
+    fallback_transform = getattr(fallback, 'transform', fallback)
     if not isinstance(data, dict):
-        return fallback
+        return fallback_transform
     try:
-        from sims4.math import Vector3, Quaternion
-        import routing
+        from sims4.math import Vector3, Quaternion, Transform
         position = data.get('position') or data.get('translation')
         orientation = data.get('orientation')
         if isinstance(position, (list, tuple)):
@@ -1185,10 +1185,9 @@ def _deserialize_transform(data, fallback=None):
         elif isinstance(orientation, dict):
             orientation = Quaternion(float(orientation.get('x', 0)), float(orientation.get('y', 0)),
                                      float(orientation.get('z', 0)), float(orientation.get('w', 1)))
-        surface = _deserialize_routing_surface(data.get('routing_surface'), fallback)
-        return routing.Location(position, orientation, routing_surface=surface)
+        return Transform(position, orientation)
     except Exception:
-        return fallback
+        return fallback_transform
 
 
 def _deserialize_routing_surface(value, fallback=None):
@@ -1271,13 +1270,13 @@ def _apply_object_operation(operation):
 def _apply_object_location(obj, object_id, zone_id, data):
     import build_buy
     previous = getattr(obj, 'location', None)
-    location = _deserialize_transform(data.get('transform'), previous)
-    if location is None:
+    transform = _deserialize_transform(data.get('transform'), previous)
+    if transform is None:
         raise ValueError('transform_unavailable')
     routing_surface = data.get('routing_surface')
-    routing_surface = _deserialize_routing_surface(routing_surface, location)
+    routing_surface = _deserialize_routing_surface(routing_surface, previous)
     build_buy.c_api_set_object_location_ex(
-        zone_id, object_id, routing_surface, location,
+        zone_id, object_id, routing_surface, transform,
         data.get('parent_id'), data.get('parent_type_info'), data.get('slot_hash'))
 
 
