@@ -405,6 +405,56 @@ def test_unknown_temporary_target_fails_closed():
         assert descriptor['target_kind'] == 'unknown'
 
 
+def test_terrain_point_descriptor_rebuilds_native_surface_proxy():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        sims4 = types.ModuleType('sims4')
+        sims4.__path__ = []
+        sandbox._register('sims4', sims4)
+        math = types.ModuleType('sims4.math')
+        sandbox._register('sims4.math', math)
+        sims4.math = math
+
+        class Vector3:
+            def __init__(self, x, y, z):
+                self.x, self.y, self.z = x, y, z
+
+        class Transform:
+            def __init__(self, position):
+                self.translation = position
+
+        class Location:
+            def __init__(self, transform, routing_surface):
+                self.transform = transform
+                self.routing_surface = routing_surface
+
+        math.Vector3, math.Transform, math.Location = Vector3, Transform, Location
+        routing = types.ModuleType('routing')
+        sandbox._register('routing', routing)
+
+        class SurfaceIdentifier:
+            def __init__(self, primary_id, secondary_id, surface_type):
+                self.primary_id, self.secondary_id, self.type = primary_id, secondary_id, surface_type
+
+        routing.SurfaceIdentifier = SurfaceIdentifier
+        sandbox.services.__path__ = []
+        terrain_service = types.ModuleType('services.terrain_service')
+        sandbox._register('services.terrain_service', terrain_service)
+        calls = []
+
+        def create_surface_proxy_from_location(location):
+            calls.append(location)
+            return types.SimpleNamespace(native_kind='TerrainPoint', location=location)
+
+        terrain_service.create_surface_proxy_from_location = create_surface_proxy_from_location
+        target = hooks._deserialize_interaction_position_target({
+            'translation': [1.0, 2.0, 3.0],
+            'routing_surface': {'primary_id': 4, 'secondary_id': 1, 'type': 0}})
+        assert target.native_kind == 'TerrainPoint'
+        assert calls[0].transform.translation.x == 1.0
+        assert calls[0].routing_surface.secondary_id == 1
+
+
 def test_host_interaction_executes_locally():
     with HooksSandbox() as sandbox:
         hooks = sandbox.hooks

@@ -375,10 +375,24 @@ def _client_enqueue_result():
 
 
 def _interaction_target_position(value):
-    candidate = _serialize_transform(value)
+    candidate = _serialize_interaction_position_target(value)
     if isinstance(candidate, dict) and candidate.get('translation') is not None:
         return candidate
     return None
+
+
+def _serialize_interaction_position_target(target):
+    """Serialize the native terrain/pick target used by live interaction AOPs."""
+    data = _serialize_transform(target)
+    if not isinstance(data, dict) or data.get('translation') is None:
+        return data
+    try:
+        level = getattr(target, 'level', None)
+        if level is not None:
+            data['level'] = int(level)
+    except Exception:
+        pass
+    return data
 
 
 def _interaction_target_type(value):
@@ -1392,9 +1406,14 @@ def _resolve_interaction(payload):
         if target is None:
             raise _InteractionResolutionError('resolve_sim_target', 'target_sim_not_loaded')
     elif target_kind == 'position':
-        target = _deserialize_location(payload.get('position'), None)
-        if target is None:
-            raise _InteractionResolutionError('resolve_position_target', 'position_target_unavailable')
+        try:
+            target = _deserialize_interaction_position_target(payload.get('position'))
+        except Exception as exc:
+            raise _InteractionResolutionError(
+                'resolve_position_target',
+                'TerrainPoint target reconstruction failed target_type=%s position=%s error=%s:%s' %
+                (payload.get('target_type'), _bounded_repr(payload.get('position')),
+                 type(exc).__name__, exc))
     elif target_kind != 'none':
         raise _InteractionResolutionError('classify_target', 'unsupported_target_kind:%s' % target_kind)
     try:
@@ -1402,7 +1421,9 @@ def _resolve_interaction(payload):
         from interactions.priority import Priority
         source = getattr(InteractionSource, 'SOURCE_SCRIPT_WITH_USER_INTENT',
                          getattr(InteractionSource, 'SCRIPT', None))
-        pick = _deserialize_location(payload.get('pick'), None) if payload.get('pick') else None
+        pick = None
+        if payload.get('pick'):
+            pick = _deserialize_interaction_position_target(payload.get('pick'))
         if pick is None and target_kind == 'position':
             pick = target
         context_kwargs = {'pick': pick}
@@ -2178,6 +2199,38 @@ def _deserialize_location(data, fallback=None):
     except Exception as exc:
         _log('KERMP LOCATION DESERIALIZE ERROR %s: %s' % (type(exc).__name__, exc))
         return fallback
+
+
+def _deserialize_interaction_position_target(data):
+    """Rebuild the installed-build terrain proxy expected by Go Here AOPs.
+
+    ``objects.terrain.TerrainPoint`` wraps ``sims4.math.Location`` and the
+    terrain service factory additionally handles pool/ocean surfaces. This is
+    deliberately separate from the Build/Buy ``routing.Location`` helper.
+    """
+    if not isinstance(data, dict):
+        raise ValueError('position_descriptor_not_dict:%s' % type(data).__name__)
+    position_data = data.get('translation') or data.get('position')
+    if not isinstance(position_data, (list, tuple)) or len(position_data) < 3:
+        raise ValueError('position_descriptor_missing_translation:%s' % _bounded_repr(data))
+    surface_data = data.get('routing_surface')
+    surface = _deserialize_routing_surface(surface_data, None)
+    if surface is None:
+        raise ValueError('position_descriptor_missing_routing_surface:%s' % _bounded_repr(surface_data))
+    try:
+        from sims4.math import Vector3, Transform, Location
+        position = Vector3(float(position_data[0]), float(position_data[1]), float(position_data[2]))
+        location = Location(Transform(position), surface)
+    except Exception as exc:
+        raise ValueError('math_location:%s:%s' % (type(exc).__name__, exc))
+    try:
+        from services.terrain_service import create_surface_proxy_from_location
+        target = create_surface_proxy_from_location(location)
+    except Exception as exc:
+        raise ValueError('surface_proxy_factory:%s:%s' % (type(exc).__name__, exc))
+    if target is None:
+        raise ValueError('surface_proxy_factory_returned_none')
+    return target
 
 
 def _position_matches(obj, transform_data, tolerance=0.001):
