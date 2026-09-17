@@ -1201,6 +1201,35 @@ def _deserialize_routing_surface(value, fallback=None):
                                      int(value.get('type', 0)))
 
 
+def _deserialize_location(data, fallback=None):
+    if not isinstance(data, dict):
+        return fallback
+    try:
+        import routing
+        transform = _deserialize_transform(data, fallback)
+        if transform is None:
+            return fallback
+        surface = _deserialize_routing_surface(data.get('routing_surface'), fallback)
+        return routing.Location(transform.translation, transform.orientation,
+                                routing_surface=surface)
+    except Exception:
+        return fallback
+
+
+def _position_matches(obj, transform_data, tolerance=0.001):
+    if not isinstance(transform_data, dict):
+        return False
+    expected = transform_data.get('translation') or transform_data.get('position')
+    actual = _components(getattr(obj, 'position', None), 3)
+    if not isinstance(expected, (list, tuple)) or actual is None or len(expected) < 3:
+        return False
+    try:
+        return all(abs(float(actual[index]) - float(expected[index])) <= tolerance
+                   for index in range(3))
+    except Exception:
+        return False
+
+
 def build_object_status():
     return {'hooks': _build_hook_info, 'adapter': adapter.status(),
             'last_error': _build_last_error}
@@ -1278,6 +1307,16 @@ def _apply_object_location(obj, object_id, zone_id, data):
     build_buy.c_api_set_object_location_ex(
         zone_id, object_id, routing_surface, transform,
         data.get('parent_id'), data.get('parent_type_info'), data.get('slot_hash'))
+    if not _position_matches(obj, data.get('transform')):
+        location = _deserialize_location(data.get('transform'), previous)
+        if location is None:
+            raise ValueError('location_unavailable')
+        obj.location = location
+        resend = getattr(obj, 'resend_location', None)
+        if callable(resend):
+            resend()
+    if not _position_matches(obj, data.get('transform')):
+        raise ValueError('move_postcondition_failed')
 
 
 def _install_zone_hooks():
