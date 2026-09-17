@@ -82,6 +82,9 @@ def main():
                 z.write(str(src), arc)
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
     if os.environ.get('KERMP_KEEP_DEV_SCRIPTS') != '1':
+        dev_lock = INSTALL_DIR / '.kermp-dev.lock'
+        if dev_lock.exists():
+            raise RuntimeError('KerMP dev watcher is running. Stop scripts\\devmode.bat before a release build.')
         scripts_dir = INSTALL_DIR / 'Scripts'
         if scripts_dir.exists():
             shutil.rmtree(str(scripts_dir))
