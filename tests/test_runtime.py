@@ -54,6 +54,23 @@ def test_roster_update_rederives_controllers_and_rejects_unowned_interaction():
         assert str(exc) == 'sim_not_owned'
 
 
+def test_owned_interaction_can_be_cancelled_but_foreign_sim_cannot():
+    session = HostSession()
+    session.add_player('p2', 'Player2')
+    session.update_sims([{'sim_id': '2', 'name': 'Bob'}])
+    session.select_sim('p2', '2')
+    session.validate_interaction('r1', 'p2', {'sim_id': '2', 'affordance_id': 'go'})
+    cancelled = session.cancel_interaction('r1', 'p2', {'sim_id': '2', 'interaction_id': '9'})
+    assert cancelled['status'] == 'cancel_requested'
+    existing = session.cancel_interaction(None, 'p2', {'sim_id': '2', 'interaction_id': '10'})
+    assert existing['request_id'] == 'cancel-p2-10'
+    try:
+        session.cancel_interaction('r1', 'p2', {'sim_id': '3', 'interaction_id': '9'})
+        assert False
+    except ValueError as exc:
+        assert str(exc) == 'sim_not_owned'
+
+
 def test_client_roster_is_forwarded_before_automatic_selection():
     async def run():
         client = KerMPClient('p2', 'Player2', '127.0.0.1', 0)

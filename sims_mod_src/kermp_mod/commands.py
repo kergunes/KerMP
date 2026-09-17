@@ -80,9 +80,10 @@ def kermp_play_status(_connection=None):
         (sim.get('installed'), sim.get('timeline_suppression_available'),
          sim.get('local_simulation_enabled'), sim.get('bypass'), sim.get('last_error') or 'none'))
     out('OMEGA send_available=%s' % omega_send)
-    out('CAPTURE installed=%s observed=%s replicated=%s dropped_local=%s error=%s' %
+    out('CAPTURE installed=%s observed=%s replicated=%s dropped_local=%s dropped_local_ops=%s error=%s' %
         (getattr(hooks, '_game_message_capture_installed', False), cap.get('observed'),
-         cap.get('replicated'), cap.get('dropped_local'), (cap.get('last_error') or 'none').splitlines()[0] if cap.get('last_error') else 'none'))
+         cap.get('replicated'), cap.get('dropped_local'), cap.get('dropped_local_ops'),
+         (cap.get('last_error') or 'none').splitlines()[0] if cap.get('last_error') else 'none'))
     out('INTERACTION intercepted=%s sent=%s accepted=%s rejected=%s started=%s last_affordance=%s last_target=%s last_sim=%s error=%s' %
         (inter.get('forwarded'), inter.get('sent'), inter.get('accepted'), inter.get('rejected'), inter.get('started'),
          inter.get('last_affordance_id'), inter.get('last_target_id'), inter.get('last_sim_id'),

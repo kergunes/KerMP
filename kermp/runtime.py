@@ -112,6 +112,22 @@ class HostRuntime:
             await self.host.broadcast(MessageType.INTERACTION_ACCEPTED, request)
             return
 
+        if event.type == MessageType.INTERACTION_CANCEL.value:
+            payload = dict(event.payload)
+            try:
+                request_id = payload.get('request_id')
+                if not request_id and payload.get('interaction_id'):
+                    request_id = next((rid for rid, item in self.host.session.interaction_requests.items()
+                                       if item.get('interaction_id') == payload.get('interaction_id')), None)
+                request = self.host.session.cancel_interaction(request_id, self.host.player_id, payload)
+            except ValueError as exc:
+                self.bridge.send(MessageType.INTERACTION_REJECTED.value,
+                                 {'request_id': payload.get('request_id'), 'reason': str(exc)})
+                return
+            self.bridge.send(MessageType.INTERACTION_CANCEL.value, request)
+            await self.host.broadcast(MessageType.INTERACTION_CANCEL, request)
+            return
+
         if event.type == MessageType.TRAVEL_REQUEST.value:
             await self._start_travel(event.payload, requested_by=self.host.player_id)
             return
@@ -176,6 +192,8 @@ class HostRuntime:
             request_id = str(event.payload.get("request_id") or "")
             if request_id in self.host.session.interaction_requests:
                 self.host.session.interaction_requests[request_id]["status"] = event.type.rsplit('.', 1)[-1]
+                if event.payload.get("interaction_id") is not None:
+                    self.host.session.interaction_requests[request_id]["interaction_id"] = str(event.payload["interaction_id"])
             await self.host.broadcast(event.type, event.payload)
 
     async def _on_network_message(self, env: Envelope) -> None:
@@ -198,6 +216,8 @@ class HostRuntime:
             self.bridge.send(env.type, env.payload)
         elif env.type == MessageType.INTERACTION_ACCEPTED.value:
             self.bridge.send(MessageType.INTERACTION_REQUEST.value, env.payload)
+        elif env.type == MessageType.INTERACTION_CANCEL.value:
+            self.bridge.send(MessageType.INTERACTION_CANCEL.value, env.payload)
         elif env.type in (MessageType.INTERACTION_REJECTED.value, MessageType.INTERACTION_STARTED.value,
                           MessageType.INTERACTION_FINISHED.value, MessageType.ERROR.value):
             self.bridge.send(env.type, env.payload)
@@ -323,6 +343,9 @@ class ClientRuntime:
         if event.type == MessageType.INTERACTION_REQUEST.value:
             await self.client.send(MessageType.INTERACTION_REQUEST, event.payload)
             return
+        if event.type == MessageType.INTERACTION_CANCEL.value:
+            await self.client.send(MessageType.INTERACTION_CANCEL, event.payload)
+            return
         if event.type in (MessageType.TRAVEL_READY.value, MessageType.TRAVEL_ZONE_READY.value):
             await self.client.send(event.type, event.payload)
             return
@@ -442,7 +465,8 @@ class ClientRuntime:
             self.bridge.send(MessageType.BUILD_APPLY.value, env.payload)
         elif env.type in (MessageType.SIM_STATE.value, MessageType.SIM_SELECTION_STATE.value,
                           MessageType.INTERACTION_ACCEPTED.value, MessageType.INTERACTION_REJECTED.value,
-                          MessageType.INTERACTION_STARTED.value, MessageType.INTERACTION_FINISHED.value):
+                          MessageType.INTERACTION_STARTED.value, MessageType.INTERACTION_FINISHED.value,
+                          MessageType.INTERACTION_CANCEL.value):
             self.bridge.send(env.type, env.payload)
         elif env.type == MessageType.ERROR.value:
             self.bridge.send("sidecar.error", env.payload)

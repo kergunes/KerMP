@@ -236,6 +236,18 @@ class KerMPHost:
                 return
             await self.broadcast(MessageType.INTERACTION_ACCEPTED, request, include_host=True)
             return
+        if env.type == MessageType.INTERACTION_CANCEL.value:
+            try:
+                request_id = env.payload.get("request_id")
+                if not request_id and env.payload.get("interaction_id"):
+                    request_id = next((rid for rid, item in self.session.interaction_requests.items()
+                                       if item.get("interaction_id") == env.payload.get("interaction_id")), None)
+                request = self.session.cancel_interaction(request_id, env.sender_id, env.payload)
+            except ValueError as exc:
+                await self._send_error(env.sender_id, str(exc))
+                return
+            await self.broadcast(MessageType.INTERACTION_CANCEL, request, include_host=True)
+            return
         if env.type == MessageType.BUILD_LOCK_RELEASE.value:
             self.session.build.release_lock(env.sender_id)
             await self.broadcast(MessageType.BUILD_LOCK_STATE, {"owner_id": None})

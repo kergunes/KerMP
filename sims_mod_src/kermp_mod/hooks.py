@@ -52,14 +52,18 @@ _timeline_suppression_installed = False
 _patches = []
 _message_stats = {'observed': 0, 'replicated': 0, 'dropped_local': 0,
                   'dropped_oversize': 0, 'dropped_unserializable': 0,
-                  'dropped_unknown': 0, 'by_id': {}, 'last_msg_id': None,
+                  'dropped_unknown': 0, 'dropped_local_ops': 0, 'by_id': {}, 'last_msg_id': None,
                   'last_error': None}
 _local_only_ids = None
+_local_only_op_ids = None
 _interaction_interception_installed = False
 _active_sim_hook_installed = False
 _last_published_active_sim_id = None
 _authoritative_sim_id = None
 _authoritative_controllers = {}
+_local_active_sim_id = None
+_interaction_request_by_id = {}
+_cancel_interception_installed = False
 _interaction_stats = {'forwarded': 0, 'dropped': 0, 'last_affordance_id': None,
                       'last_target_id': None, 'last_sim_id': None, 'last_error': None,
                       'sent': 0, 'accepted': 0, 'rejected': 0, 'started': 0}
@@ -106,6 +110,7 @@ def install():
     bridge.on('interaction.rejected', _interaction_rejected)
     bridge.on('interaction.started', _interaction_started)
     bridge.on('interaction.finished', _interaction_finished)
+    bridge.on('interaction.cancel', _interaction_cancel)
     bridge.on('interaction.request', _interaction_request)
     bridge.on('game.raw_message', _raw_game_message)
     bridge.start()
@@ -117,6 +122,7 @@ def install():
     _install_travel_hook()
     _install_interaction_interception()
     _install_active_sim_hooks()
+    _install_cancel_interception()
     _log('KerMP installed')
 
 
@@ -127,7 +133,7 @@ def teardown():
     The caller should abort the reload on a non-empty result, because the
     runtime may otherwise be left in an unknown half-dismantled state.
     """
-    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed, _interaction_interception_installed, _active_sim_hook_installed, _last_published_active_sim_id
+    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed, _interaction_interception_installed, _active_sim_hook_installed, _last_published_active_sim_id, _cancel_interception_installed
     errors = []
     # Stop accepting new bridge events first.
     try:
@@ -153,6 +159,7 @@ def teardown():
     _timeline_suppression_installed = False
     _interaction_interception_installed = False
     _active_sim_hook_installed = False
+    _cancel_interception_installed = False
     _last_published_active_sim_id = None
     _installed = False
     return errors
@@ -311,6 +318,70 @@ def _classify_message(msg_id):
     return 'replicate'
 
 
+def _local_only_operation_ids():
+    """Resolve S4MP-compatible client-local Distributor operation types."""
+    global _local_only_op_ids
+    if _local_only_op_ids is not None:
+        return _local_only_op_ids
+    ids = set()
+    try:
+        from protocolbuffers.DistributorOps_pb2 import Operation
+        for name in (
+                'FOCUS', 'HOVERTIP_CREATED', 'SET_SIM_ACTIVE', 'SET_VFX_MASK',
+                'CLIENT_CREATE', 'CLIENT_DELETE', 'SET_GAME_TIME',
+                'LIVE_DRAG_START', 'LIVE_DRAG_END', 'LIVE_DRAG_CANCEL',
+                'SELECT_CAREER_UI', 'SHOW_BILLS_DIALOG', 'SITUATION_CALLBACK_RESPONSE',
+                'MSG_SIM_PERSONALITY_ASSIGNMENT', 'TAKE_PHOTO', 'UI_LIGHT_COLOR_SHOW',
+                'OPEN_INVENTORY', 'NOTEBOOK_VIEW', 'DYNAMIC_SIGN_VIEW',
+                'COMMUNITY_POLICY_BOARD', 'UNIVERSITY_ENROLLMENT_WIZARD', 'BOOK_VIEW',
+                'END_OF_WORKDAY', 'SHOW_SOCIAL_MEDIA_DIALOG', 'SEND_UI_MESSAGE',
+                'RETAIL_BALANCE_TRANSFER_DIALOG', 'BUSINESS_SUMMARY_DIALOG',
+                'SHOW_HORSE_COMPETITION_SELECTOR', 'SHOW_RENTAL_UNIT_MANAGEMENT',
+                'SHOW_LIFETIME_MILESTONES_PANEL', 'CUSTOM_SCHEDULE_SET_CUSTOM_SCHEDULE',
+                'CUSTOM_SCHEDULE_SET_CUSTOM_SET_SCHEDULE_LIST',
+                'CUSTOM_SCHEDULE_SET_CUSTOM_SET_ASSIGNMENT_LIST',
+                'MSG_SITUATION_GETAWAY_RULES', 'SET_RESIDENT_LIST',
+                'CUSTOM_SCHEDULE_SET_CUSTOM_ASSIGNMENT'):
+            value = getattr(Operation, name, None)
+            if isinstance(value, int):
+                ids.add(value)
+    except Exception:
+        pass
+    _local_only_op_ids = ids
+    return ids
+
+
+def _filtered_remote_message(message):
+    """Copy a ViewUpdate and remove client-local ops from the LAN copy only."""
+    try:
+        from protocolbuffers import Distributor_pb2
+        view_update_type = getattr(Distributor_pb2, 'ViewUpdate', None)
+        if view_update_type is None or not isinstance(message, view_update_type):
+            return message
+    except Exception:
+        return message
+    try:
+        filtered = view_update_type()
+        filtered.CopyFrom(message)
+        local_ids = _local_only_operation_ids()
+        removed = 0
+        for entry in list(filtered.entries):
+            operations = getattr(getattr(entry, 'operation_list', None), 'operations', None)
+            if operations is None:
+                continue
+            for index in range(len(operations) - 1, -1, -1):
+                if int(getattr(operations[index], 'type', -1)) in local_ids:
+                    del operations[index]
+                    removed += 1
+            if len(operations) == 0:
+                filtered.entries.remove(entry)
+        _message_stats['dropped_local_ops'] += removed
+        return filtered
+    except Exception as exc:
+        _message_stats['last_error'] = 'remote_op_filter: %s' % exc
+        return message
+
+
 def message_capture_status():
     return dict(_message_stats)
 
@@ -359,7 +430,7 @@ def _install_game_message_capture():
                 if not callable(serializer):
                     _message_stats['dropped_unserializable'] += 1
                     return result
-                raw = serializer()
+                raw = _filtered_remote_message(message).SerializeToString()
                 if not isinstance(raw, (bytes, bytearray)):
                     raw = bytes(raw)
                 if len(raw) > _MAX_RAW_GAME_MESSAGE_BYTES:
@@ -462,8 +533,10 @@ def _install_interaction_interception():
                 _interaction_stats['last_affordance_id'] = affordance_id
                 _interaction_stats['last_target_id'] = target_id
                 _interaction_stats['last_sim_id'] = sim_id
+                request_id = 'local-%s' % __import__('uuid').uuid4().hex
+                _interaction_request_by_id[request_id] = {'sim_id': str(sim_id) if sim_id is not None else ''}
                 sent = bridge.emit('interaction.request', {
-                    'request_id': 'local-%s' % __import__('uuid').uuid4().hex,
+                    'request_id': request_id,
                     'affordance_id': str(affordance_id),
                     'target_id': str(target_id) if target_id is not None else '0',
                     'sim_id': str(sim_id) if sim_id is not None else '',
@@ -760,6 +833,8 @@ def _sim_selection_state(payload):
     sim_id = str(payload.get('sim_id') or '')
     if sim_id:
         _authoritative_controllers[sim_id] = list(payload.get('controllers') or [])
+    if _sidecar_role == 'client' and payload.get('player_id') not in ('local', _sidecar_role, _sidecar_player_id):
+        _restore_local_active_sim()
 
 
 def _sim_state(payload):
@@ -784,8 +859,70 @@ def _interaction_rejected(payload):
     _interaction_stats['last_error'] = str((payload or {}).get('reason') or 'rejected')
 
 
-def _interaction_started(_payload):
+def _interaction_started(payload):
     _interaction_stats['started'] += 1
+    payload = payload or {}
+    request_id = str(payload.get('request_id') or '')
+    interaction_id = payload.get('interaction_id')
+    if request_id and interaction_id and request_id in _interaction_request_by_id:
+        _interaction_request_by_id[request_id]['interaction_id'] = str(interaction_id)
+
+
+def _interaction_cancel(payload):
+    if _sidecar_role != 'host':
+        return
+    request_id = str((payload or {}).get('request_id') or '')
+    sim_id = str((payload or {}).get('sim_id') or '')
+    try:
+        import services
+        info = services.sim_info_manager().get(int(sim_id))
+        sim = info.get_sim_instance(allow_hidden_flags=True) if info else None
+        if sim is None:
+            raise ValueError('sim_not_loaded')
+        interaction_id = int(str((payload or {}).get('interaction_id') or '0'))
+        queue = getattr(sim, 'queue', None)
+        interaction = None
+        finder = getattr(queue, 'find_interaction_by_id', None) if queue is not None else None
+        if callable(finder):
+            interaction = finder(interaction_id)
+        if interaction is None:
+            finder = getattr(sim, 'find_interaction_by_id', None)
+            if callable(finder):
+                interaction = finder(interaction_id)
+        if interaction is None:
+            raise ValueError('interaction_not_found')
+        cancel = getattr(interaction, 'cancel_user', None)
+        if not callable(cancel):
+            raise ValueError('cancel_unavailable')
+        cancel('KerMP remote client cancellation')
+        bridge.emit('interaction.finished', {'request_id': request_id, 'interaction_id': str(interaction_id),
+                                             'status': 'cancelled'})
+    except Exception as exc:
+        bridge.emit('interaction.rejected', {'request_id': request_id, 'reason': '%s: %s' %
+                                             (type(exc).__name__, exc)})
+
+
+def _restore_local_active_sim():
+    if not _local_active_sim_id:
+        return False
+    try:
+        import services
+        client = services.get_first_client()
+        for name in ('set_active_sim_by_id', 'set_active_sim'):
+            method = getattr(type(client), name, None) if client is not None else None
+            original = getattr(method, '_kermp_original', None)
+            if callable(original):
+                if name.endswith('_by_id'):
+                    original(client, int(_local_active_sim_id))
+                else:
+                    info = services.sim_info_manager().get(int(_local_active_sim_id))
+                    sim = info.get_sim_instance(allow_hidden_flags=True) if info else None
+                    if sim is not None:
+                        original(client, sim)
+                return True
+    except Exception:
+        _log('KERMP local active Sim restore failed: %s' % traceback.format_exc())
+    return False
 
 
 def _interaction_finished(_payload):
@@ -794,11 +931,12 @@ def _interaction_finished(_payload):
 
 def _publish_active_sim_if_ready():
     """Publish the local observation only after the live roster contains it."""
-    global _last_published_active_sim_id
+    global _last_published_active_sim_id, _local_active_sim_id
     if _sidecar_role not in ('host', 'client'):
         return False
     sims = enumerate_sims()
     active_id = _active_sim_id()
+    _local_active_sim_id = active_id
     bridge.emit('sims.state', {'sims': sims, 'active_sim_id': active_id})
     if not active_id or active_id not in {item['sim_id'] for item in sims}:
         return False
@@ -841,6 +979,44 @@ def _install_active_sim_hooks():
         return installed
     except Exception:
         _log('KERMP active Sim hook unavailable: %s' % traceback.format_exc())
+        return False
+
+
+def _install_cancel_interception():
+    """Route the stable cancel_super_interaction command from client to host."""
+    global _cancel_interception_installed
+    if _cancel_interception_installed:
+        return True
+    try:
+        from server_commands import interaction_commands
+        original = getattr(interaction_commands, 'cancel_super_interaction', None)
+        if not callable(original) or getattr(original, '_kermp_wrapped', False):
+            return False
+        def wrapped(super_interaction_id, context_handle, *args, **kwargs):
+            if _sidecar_role != 'client':
+                return original(super_interaction_id, context_handle, *args, **kwargs)
+            sim_id = _active_sim_id()
+            request_id = None
+            for rid, item in _interaction_request_by_id.items():
+                if item.get('sim_id') == sim_id:
+                    request_id = rid
+            sent = bridge.emit('interaction.cancel', {
+                'request_id': request_id,
+                'sim_id': sim_id or '',
+                'interaction_id': str(super_interaction_id),
+                'context_handle': str(context_handle),
+            })
+            if not sent:
+                _interaction_stats['last_error'] = 'bridge_disconnected'
+            return None
+        wrapped._kermp_wrapped = True
+        wrapped._kermp_original = original
+        interaction_commands.cancel_super_interaction = wrapped
+        _record_patch(interaction_commands, 'cancel_super_interaction', original)
+        _cancel_interception_installed = True
+        return True
+    except Exception:
+        _log('KERMP cancel interception unavailable: %s' % traceback.format_exc())
         return False
 
 

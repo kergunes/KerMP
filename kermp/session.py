@@ -139,3 +139,24 @@ class HostSession:
                   "position": payload.get("position"), "status": "accepted"}
         self.interaction_requests[request_id] = result
         return result
+
+    def cancel_interaction(self, request_id: str, player_id: str, payload: dict) -> dict:
+        request_id = str(request_id or "")
+        player = self.players.get(player_id)
+        sim_id = str(payload.get("sim_id") or "")
+        if not player or sim_id != player.active_sim_id:
+            raise ValueError("sim_not_owned")
+        interaction_id = payload.get("interaction_id")
+        if interaction_id in (None, "", 0, "0"):
+            raise ValueError("missing_interaction_id")
+        if not request_id:
+            request_id = "cancel-%s-%s" % (player_id, interaction_id)
+        request = self.interaction_requests.get(request_id)
+        if request is None:
+            request = {"request_id": request_id, "player_id": player_id, "sim_id": sim_id,
+                       "affordance_id": None, "target_id": None, "position": None}
+            self.interaction_requests[request_id] = request
+        request["status"] = "cancel_requested"
+        return {"request_id": request_id, "player_id": player_id, "sim_id": sim_id,
+                "interaction_id": interaction_id,
+                "context_handle": payload.get("context_handle"), "status": request["status"]}
