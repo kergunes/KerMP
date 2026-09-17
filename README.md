@@ -1,5 +1,21 @@
 # KerMP — LAN multiplayer sidecar and Build/Buy foundations
 
+## Quick start (two PCs)
+
+On each PC, from a fresh clone:
+
+```powershell
+scripts\setup.bat        # installs deps, builds/installs the Sims mod, runs preflight
+scripts\preflight.bat    # (optional) re-check the environment before Host/Join
+scripts\gui.bat          # launch the GUI
+```
+
+Then put the same save in `Documents\Electronic Arts\The Sims 4\saves` on both
+machines, load the same household/lot in each Sims instance, and in the GUI:
+Host on PC 1, Join the host LAN IP on PC 2. In-game diagnostics:
+`kermp.play.status`, `kermp.simulation.status`, `kermp.status`,
+`kermp.build.status`.
+
 ## Windows GUI
 
 The normal startup path is now the real desktop application (no terminal is
