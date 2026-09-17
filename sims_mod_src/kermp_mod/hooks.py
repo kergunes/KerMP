@@ -645,6 +645,9 @@ def _install_interaction_interception():
                 target = kwargs.get('target')
                 if target is None and args:
                     target = args[0]
+                context = kwargs.get('context')
+                if context is None and len(args) > 1:
+                    context = args[1]
                 target_id = _coerce_id(target)
                 sim_id = _coerce_id(getattr(self, 'sim_info', None)) or _coerce_id(self)
                 if affordance_id is None:
@@ -655,6 +658,25 @@ def _install_interaction_interception():
                 _interaction_stats['last_affordance_id'] = affordance_id
                 _interaction_stats['last_target_id'] = target_id
                 _interaction_stats['last_sim_id'] = sim_id
+                position = None
+                if target_id is None:
+                    candidate = _serialize_transform(target)
+                    if isinstance(candidate, dict) and candidate.get('translation') is not None:
+                        position = candidate
+                if position is None:
+                    pick = kwargs.get('pick')
+                    if pick is None and context is not None:
+                        pick = getattr(context, 'pick', None)
+                    candidate = _serialize_transform(pick)
+                    if isinstance(candidate, dict) and candidate.get('translation') is not None:
+                        position = candidate
+                interaction_kwargs = {}
+                for key, value in kwargs.items():
+                    if key in ('target', 'context'):
+                        continue
+                    safe = _json_value(value)
+                    if isinstance(safe, (dict, list, str, int, float, bool)) or safe is None:
+                        interaction_kwargs[key] = safe
                 request_id = 'local-%s' % __import__('uuid').uuid4().hex
                 _interaction_request_by_id[request_id] = {'sim_id': str(sim_id) if sim_id is not None else ''}
                 sent = bridge.emit('interaction.request', {
@@ -662,6 +684,8 @@ def _install_interaction_interception():
                     'affordance_id': str(affordance_id),
                     'target_id': str(target_id) if target_id is not None else '0',
                     'sim_id': str(sim_id) if sim_id is not None else '',
+                    'position': position,
+                    'interaction_kwargs': interaction_kwargs,
                 })
                 if sent:
                     _interaction_stats['sent'] += 1
@@ -1159,6 +1183,10 @@ def _resolve_interaction(payload):
         target = services.object_manager().get(int(str(target_id)))
         if target is None:
             raise ValueError('target_not_found')
+    elif payload.get('position') is not None:
+        target = _deserialize_location(payload.get('position'), None)
+        if target is None:
+            raise ValueError('position_target_unavailable')
     affordance_id = int(str(payload['affordance_id']))
     from sims4.resources import Types
     affordance = services.get_instance_manager(Types.INTERACTION).get(affordance_id)
@@ -1167,7 +1195,7 @@ def _resolve_interaction(payload):
     from interactions.context import InteractionContext, InteractionSource
     from interactions.priority import Priority
     context = InteractionContext(sim, InteractionSource.SCRIPT, Priority.High)
-    return sim, affordance, target, context
+    return sim, affordance, target, context, dict(payload.get('interaction_kwargs') or {})
 
 
 def _interaction_request(payload):
@@ -1175,8 +1203,8 @@ def _interaction_request(payload):
     _interaction_stats['delivered'] += 1
     _interaction_stats['last_request_id'] = request_id
     try:
-        sim, affordance, target, context = _resolve_interaction(payload)
-        result = sim.push_super_affordance(affordance, target, context)
+        sim, affordance, target, context, interaction_kwargs = _resolve_interaction(payload)
+        result = sim.push_super_affordance(affordance, target, context, **interaction_kwargs)
         if not result:
             raise ValueError('push_rejected')
         bridge.emit('interaction.started', {'request_id': request_id, 'sim_id': payload.get('sim_id'),

@@ -302,6 +302,23 @@ def test_client_interaction_forwarded_not_executed():
         assert requests[0]['affordance_id'] == '123'
         assert requests[0]['target_id'] == '7'
         assert requests[0]['sim_id'] == '77'
+        assert requests[0]['position'] is None
+        assert requests[0]['interaction_kwargs'] == {}
+
+
+def test_client_position_interaction_carries_pick_location():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        hooks._sidecar_role = 'client'
+        assert hooks._install_interaction_interception() is True
+        emitted = []
+        hooks.bridge.emit = lambda t, p: emitted.append((t, p)) or True
+        sim = sandbox.sim_mod.Sim()
+        target = types.SimpleNamespace(position=types.SimpleNamespace(x=1, y=2, z=3))
+        assert sim.push_super_affordance(types.SimpleNamespace(guid64=123), target) is None
+        request = next(p for t, p in emitted if t == 'interaction.request')
+        assert request['target_id'] == '0'
+        assert request['position']['translation'] == [1.0, 2.0, 3.0]
 
 
 def test_host_interaction_executes_locally():
