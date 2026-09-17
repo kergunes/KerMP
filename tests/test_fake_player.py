@@ -8,7 +8,7 @@ from pathlib import Path
 
 from kermp.protocol import Envelope, MessageType
 from kermp.save_sync import SaveSlot
-from tools.fake_player import FakePlayer, FakePlayerState, move_payload, parse_command
+from tools.fake_player import FakePlayer, FakePlayerState, buy_payload, move_payload, parse_command
 
 
 def make_client(accept_save_sync=False):
@@ -26,6 +26,10 @@ def test_command_parser_and_move_payload():
     assert parse_command("") == ("", [])
     assert move_payload("7", ["1", "2", "3", "0", "0", "0", "1"]) == {
         "object_id": "7", "transform": {"translation": [1.0, 2.0, 3.0], "orientation": [0.0, 0.0, 0.0, 1.0]}}
+    assert buy_payload("9", "229977", ["1", "2", "3", "0", "0", "0", "1"]) == {
+        "object_id": "9", "definition_id": "229977", "object_state": 0,
+        "location_type": 1, "content_source": 0,
+        "transform": {"translation": [1.0, 2.0, 3.0], "orientation": [0.0, 0.0, 0.0, 1.0]}}
 
 
 def test_travel_clock_dialog_and_build_payloads():
@@ -86,5 +90,16 @@ def test_build_lock_state_flushes_queue():
         peer.recv(65536)
         client.handle(Envelope.make(MessageType.BUILD_LOCK_STATE, {"owner_id": "player2", "granted_to": "player2"}, "host"))
         assert read_sent(peer).payload == {"op": "object.scale", "data": {"object_id": "7", "scale": 1.5}}
+    finally:
+        client.sock.close(); peer.close()
+
+
+def test_build_command_refreshes_even_a_locally_owned_lock():
+    client, peer = make_client()
+    try:
+        client.state.build_lock_owner = "player2"
+        client.run_command("scale 7 1.5")
+        assert read_sent(peer).type == MessageType.BUILD_LOCK_REQUEST.value
+        assert client.pending_build == [("object.scale", {"object_id": "7", "scale": 1.5})]
     finally:
         client.sock.close(); peer.close()

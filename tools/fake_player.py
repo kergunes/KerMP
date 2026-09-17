@@ -25,6 +25,14 @@ def move_payload(object_id: str, values: list[str]) -> dict:
     }}
 
 
+def buy_payload(object_id: str, definition_id: str, values: list[str] | None = None) -> dict:
+    data = {"object_id": str(object_id), "definition_id": str(definition_id),
+            "object_state": 0, "location_type": 1, "content_source": 0}
+    if values:
+        data["transform"] = move_payload(object_id, values)["transform"]
+    return data
+
+
 @dataclass
 class FakePlayerState:
     player_id: str
@@ -111,7 +119,9 @@ class FakePlayer:
             self.state.build_lock_owner = p.get("owner_id")
             if self.state.build_lock_owner == self.args.player_id:
                 queued, self.pending_build = self.pending_build[:], []
-                for op, data in queued: self.send_build(op, data)
+                for op, data in queued:
+                    self.send(MessageType.BUILD_OPERATION, {"op": op, "data": data})
+                    print(f"[BUILD] sent {op} object={data.get('object_id', '')}", flush=True)
                 print("[BUILD] lock granted", flush=True)
         elif typ in (MessageType.TRAVEL_PROPOSE.value, MessageType.TRAVEL_COMMIT.value, MessageType.TRAVEL_RESUME.value, MessageType.TRAVEL_ABORT.value, MessageType.TRAVEL_VIEW_BATCH.value):
             self.state.update_travel(typ, p); print(f"[TRAVEL] {typ.removeprefix('travel.')} epoch={p.get('epoch')} txn={p.get('txn_id')} zone={p.get('zone_id', '')}", flush=True)
@@ -159,9 +169,9 @@ class FakePlayer:
             raise
 
     def send_build(self, op: str, data: dict) -> None:
-        if self.state.build_lock_owner != self.args.player_id:
-            self.pending_build.append((op, data)); self.send(MessageType.BUILD_LOCK_REQUEST); print("→ build queued, requesting lock", flush=True); return
-        self.send(MessageType.BUILD_OPERATION, {"op": op, "data": data}); print(f"[BUILD] sent {op} object={data.get('object_id', '')}", flush=True)
+        self.pending_build.append((op, data))
+        self.send(MessageType.BUILD_LOCK_REQUEST)
+        print("→ build queued, requesting fresh lock", flush=True)
 
     def run_command(self, line: str) -> bool:
         command, a = parse_command(line); self.state.last_command = line.strip()
@@ -205,7 +215,9 @@ class FakePlayer:
     def build_command(self, command: str, a: list[str]) -> None:
         self.require(a, 1); oid = a[0]
         if command == "move": op, data = "object.move", move_payload(oid, a[1:])
-        elif command == "buy": self.require(a, 2); op, data = "object.create", {"object_id": oid, "definition_id": a[1]}
+        elif command == "buy":
+            if len(a) not in (2, 9): raise ValueError("usage: buy <object_id> <definition_id> [<x> <y> <z> <qx> <qy> <qz> <qw>]")
+            op, data = "object.create", buy_payload(oid, a[1], a[2:])
         elif command == "recolor": self.require(a, 2); op, data = "object.definition", {"object_id": oid, "definition_id": a[1]}
         elif command == "scale": self.require(a, 2); op, data = "object.scale", {"object_id": oid, "scale": float(a[1])}
         elif command == "parent": self.require(a, 2); op, data = "object.set_parent", {"object_id": oid, "parent_id": a[1]}
@@ -224,7 +236,7 @@ class FakePlayer:
         else: raise ValueError("unknown scenario")
 
     def print_help(self) -> None:
-        print("help | status | manifest | select <sim_id> | interact <affordance_id> [target_id] | cancel <interaction_id> | choices <target_id> | travel <zone_id> | travel-status | build-lock | build-release | buy <object_id> <definition_id> | move <object_id> <x> <y> <z> <qx> <qy> <qz> <qw> | recolor <object_id> <definition_id> | scale <object_id> <scale> | clear-parent <object_id> | parent <object_id> <parent_id> | sell <object_id> | pause | resume | speed <0-3> | dialogs | dialog <id> yes|no|select <value> | raw-status | raw-watch on|off | scenario travel|build-smoke|build-destructive ... | last | snapshot | quit", flush=True)
+        print("help | status | manifest | select <sim_id> | interact <affordance_id> [target_id] | cancel <interaction_id> | choices <target_id> | travel <zone_id> | travel-status | build-lock | build-release | buy <object_id> <definition_id> [<x> <y> <z> <qx> <qy> <qz> <qw>] | move <object_id> <x> <y> <z> <qx> <qy> <qz> <qw> | recolor <object_id> <definition_id> | scale <object_id> <scale> | clear-parent <object_id> | parent <object_id> <parent_id> | sell <object_id> | pause | resume | speed <0-3> | dialogs | dialog <id> yes|no|select <value> | raw-status | raw-watch on|off | scenario travel|build-smoke|build-destructive ... | last | snapshot | quit", flush=True)
 
     def print_status(self) -> None:
         print(json.dumps({"player_id": self.args.player_id, "connection": self.state.connection, "session_id": self.state.session_id, "compatibility": self.state.compatibility, "readiness": self.state.readiness, "save_progress": self.state.readiness.get("save_progress"), "bridge_readiness": self.state.readiness.get("bridge_connected"), "zone": self.state.zone, "clock": self.state.clock, "build_lock_owner": self.state.build_lock_owner, "travel": self.state.travel, "last_error": self.state.last_error}, indent=2), flush=True)

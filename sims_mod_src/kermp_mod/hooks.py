@@ -1185,14 +1185,21 @@ def _deserialize_transform(data, fallback=None):
         elif isinstance(orientation, dict):
             orientation = Quaternion(float(orientation.get('x', 0)), float(orientation.get('y', 0)),
                                      float(orientation.get('z', 0)), float(orientation.get('w', 1)))
-        surface = data.get('routing_surface')
-        if isinstance(surface, dict):
-            surface = routing.SurfaceIdentifier(int(surface.get('primary_id', 0)),
-                                                 int(surface.get('secondary_id', 0)),
-                                                 int(surface.get('type', 0)))
+        surface = _deserialize_routing_surface(data.get('routing_surface'), fallback)
         return routing.Location(position, orientation, routing_surface=surface)
     except Exception:
         return fallback
+
+
+def _deserialize_routing_surface(value, fallback=None):
+    if value is None:
+        return getattr(fallback, 'routing_surface', None) if fallback is not None else None
+    if not isinstance(value, dict):
+        return value
+    import routing
+    return routing.SurfaceIdentifier(int(value.get('primary_id', 0)),
+                                     int(value.get('secondary_id', 0)),
+                                     int(value.get('type', 0)))
 
 
 def build_object_status():
@@ -1208,15 +1215,21 @@ def _apply_object_operation(operation):
     try:
         import services
         zone_id = data.get('zone_id')
+        if zone_id is None:
+            zone_id = services.current_zone_id()
+        zone_id = int(str(zone_id))
         object_id = int(str(data.get('object_id'))) if data.get('object_id') is not None else None
         if op == 'object.create':
             import objects.system
             result = objects.system.c_api_create_object(
                 zone_id, int(str(data.get('definition_id'))), object_id,
-                data.get('object_state'), data.get('location_type'), data.get('content_source'))
-            obj = result if hasattr(result, 'id') else services.object_manager().get(object_id)
+                data.get('object_state', 0), data.get('location_type', 1),
+                data.get('content_source', 0))
+            obj = services.object_manager().get(object_id) if object_id else None
+            if obj is None and hasattr(result, 'id'):
+                obj = result
             if obj is not None and data.get('transform'):
-                obj.location = _deserialize_transform(data.get('transform'), getattr(obj, 'location', None))
+                _apply_object_location(obj, object_id or getattr(obj, 'id', None), zone_id, data)
             return True
         if op == 'object.destroy':
             import objects.system
@@ -1245,11 +1258,7 @@ def _apply_object_operation(operation):
                 object_id, _deserialize_transform(data.get('transform'), getattr(obj, 'location', None)),
                 zone_id, data.get('routing_surface'))
         elif op == 'object.move':
-            import build_buy
-            build_buy.c_api_set_object_location_ex(
-                zone_id, object_id, data.get('routing_surface'),
-                _deserialize_transform(data.get('transform'), getattr(obj, 'location', None)),
-                data.get('parent_id'), data.get('parent_type_info'), data.get('slot_hash'))
+            _apply_object_location(obj, object_id, zone_id, data)
         elif op == 'funds.modify':
             raise ValueError('funds.modify is host-authoritative and not a client object apply')
         else:
@@ -1257,6 +1266,19 @@ def _apply_object_operation(operation):
     except Exception as exc:
         _build_last_error = '%s: %s' % (type(exc).__name__, exc)
         raise
+
+
+def _apply_object_location(obj, object_id, zone_id, data):
+    import build_buy
+    previous = getattr(obj, 'location', None)
+    location = _deserialize_transform(data.get('transform'), previous)
+    if location is None:
+        raise ValueError('transform_unavailable')
+    routing_surface = data.get('routing_surface')
+    routing_surface = _deserialize_routing_surface(routing_surface, location)
+    build_buy.c_api_set_object_location_ex(
+        zone_id, object_id, routing_surface, location,
+        data.get('parent_id'), data.get('parent_type_info'), data.get('slot_hash'))
 
 
 def _install_zone_hooks():
