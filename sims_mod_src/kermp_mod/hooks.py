@@ -76,7 +76,8 @@ _aop_stats = {'seen': 0, 'user_seen': 0, 'forwarded': 0, 'last_entrypoint': None
               'last_pick_present': False, 'last_error': None}
 _interaction_stats = {'forwarded': 0, 'dropped': 0, 'last_affordance_id': None,
                       'last_target_id': None, 'last_sim_id': None, 'last_error': None,
-                      'sent': 0, 'accepted': 0, 'rejected': 0, 'started': 0,
+                      'sent': 0, 'accepted': 0, 'rejected': 0, 'queued': 0,
+                      'started': 0,
                       'delivered': 0, 'apply_accepted': 0, 'apply_rejected': 0,
                       'last_request_id': None}
 _command_proxy_installed = False
@@ -84,9 +85,15 @@ _command_registry_patches = []
 _remote_clients = {}
 _remote_accounts = {}
 _headless_remote_client_ids = set()
+_native_interaction_lifecycle_installed = False
+_native_interaction_requests = {}
+_active_native_command = None
 _command_stats = {'installed': False, 'captured': 0, 'forwarded': 0, 'fallback': 0,
-                  'replayed': 0, 'rejected': 0, 'remote_clients': 0,
+                  'received': 0, 'replayed': 0, 'result_truthy': 0,
+                  'queue_created': 0, 'interaction_started': 0,
+                  'rejected': 0, 'remote_clients': 0, 'by_name': {},
                   'last_command': None, 'last_player_id': None, 'last_remote_client_id': None,
+                  'last_result_type': None, 'last_interaction_id': None,
                   'remote_client_stage': None, 'remote_client_registration': 'unknown',
                   'last_error': None}
 
@@ -130,6 +137,7 @@ def install():
     bridge.on('sim.state', _sim_state)
     bridge.on('interaction.accepted', _interaction_accepted)
     bridge.on('interaction.rejected', _interaction_rejected)
+    bridge.on('interaction.queued', _interaction_queued)
     bridge.on('interaction.started', _interaction_started)
     bridge.on('interaction.finished', _interaction_finished)
     bridge.on('interaction.cancel', _interaction_cancel)
@@ -145,6 +153,7 @@ def install():
     _install_game_message_capture()
     _install_travel_hook()
     _install_interaction_interception()
+    _install_native_interaction_lifecycle()
     _install_active_sim_hooks()
     _install_cancel_interception()
     _install_clock_hooks()
@@ -158,8 +167,13 @@ def teardown():
     The caller should abort the reload on a non-empty result, because the
     runtime may otherwise be left in an unknown half-dismantled state.
     """
-    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed, _interaction_interception_installed, _active_sim_hook_installed, _last_published_active_sim_id, _cancel_interception_installed, _clock_hooks_installed, _clock_apply_bypass, _aop_interception_installed, _command_proxy_installed
+    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed, _interaction_interception_installed, _active_sim_hook_installed, _last_published_active_sim_id, _cancel_interception_installed, _clock_hooks_installed, _clock_apply_bypass, _aop_interception_installed, _command_proxy_installed, _native_interaction_lifecycle_installed, _active_native_command
     errors = []
+    try:
+        from . import interaction_trace
+        interaction_trace.stop()
+    except Exception as exc:
+        errors.append('interaction trace: %s' % exc)
     # Stop accepting new bridge events first.
     try:
         bridge.stop()
@@ -196,6 +210,9 @@ def teardown():
     _clock_apply_bypass = False
     _aop_interception_installed = False
     _command_proxy_installed = False
+    _native_interaction_lifecycle_installed = False
+    _native_interaction_requests.clear()
+    _active_native_command = None
     _last_published_active_sim_id = None
     _installed = False
     return errors
@@ -572,6 +589,15 @@ def _command_target_descriptor(target, context=None):
     return descriptor
 
 
+def _command_stat(name, field):
+    name = str(name or 'unknown')
+    values = _command_stats['by_name'].setdefault(name, {
+        'captured': 0, 'received': 0, 'replayed': 0, 'result_truthy': 0,
+        'queue_created': 0, 'interaction_started': 0, 'rejected': 0,
+    })
+    values[field] = values.get(field, 0) + 1
+
+
 def _capture_native_push(command_name, original, affordance, opt_target, opt_sim,
                          priority, interaction_context, connection):
     """Capture only EA-native values that have an exact typed replay form.
@@ -582,6 +608,7 @@ def _capture_native_push(command_name, original, affordance, opt_target, opt_sim
     the Go Here failure this proxy is meant to avoid.
     """
     _command_stats['captured'] += 1
+    _command_stat(command_name, 'captured')
     _command_stats['last_command'] = command_name
     try:
         target_getter = getattr(opt_target, 'get_target', None)
@@ -626,6 +653,7 @@ def _capture_native_push(command_name, original, affordance, opt_target, opt_sim
 
 def _capture_native_cancel(command_name, original, args, connection):
     _command_stats['captured'] += 1
+    _command_stat(command_name, 'captured')
     _command_stats['last_command'] = command_name
     sim_id = _active_sim_id()
     if not sim_id:
@@ -662,6 +690,7 @@ def _capture_native_choice(command_name, original, wire_values, connection, dele
     reconstruction.
     """
     _command_stats['captured'] += 1
+    _command_stat(command_name, 'captured')
     _command_stats['last_command'] = command_name
     try:
         import services
@@ -684,7 +713,8 @@ def _capture_native_choice(command_name, original, wire_values, connection, dele
     except Exception as exc:
         _command_stats['last_error'] = '%s: %s' % (type(exc).__name__, exc)
         _command_stats['fallback'] += 1
-        return original(*values, connection)
+        local_values = native_values if native_values is not None else wire_values
+        return original(*local_values, connection)
 
 
 def _install_native_command_proxy():
@@ -1004,6 +1034,76 @@ def _native_interaction_source(value):
     return getattr(InteractionContext, str(value), InteractionContext.SOURCE_PIE_MENU)
 
 
+def _queue_entries(sim):
+    entries = {}
+    try:
+        for interaction in list(getattr(sim, 'queue', ())):
+            interaction_id = getattr(interaction, 'id', None)
+            if interaction_id is not None:
+                entries[str(interaction_id)] = interaction
+    except Exception:
+        pass
+    return entries
+
+
+def _native_interaction_started(interaction):
+    """Emit started only from EA's actual interaction-start event."""
+    interaction_id = str(getattr(interaction, 'id', '') or '')
+    request = _native_interaction_requests.pop(interaction_id, None)
+    if request is None and _active_native_command is not None:
+        request = dict(_active_native_command)
+    if not request or request.get('name') not in (
+            'interactions.select', 'interactions.push',
+            'interactions.push_targeting_sim_info', 'interaction.request'):
+        return
+    name = request.get('name')
+    _command_stats['interaction_started'] += 1
+    _command_stats['last_interaction_id'] = interaction_id or None
+    _command_stat(name, 'interaction_started')
+    bridge.emit('interaction.started', {
+        'request_id': request.get('request_id'),
+        'sim_id': request.get('sim_id'),
+        'interaction_id': interaction_id,
+        'command': name,
+        'signal': 'Interaction._trigger_interaction_start_event',
+    })
+
+
+def _install_native_interaction_lifecycle():
+    global _native_interaction_lifecycle_installed
+    if _native_interaction_lifecycle_installed:
+        return True
+    try:
+        from interactions.base.interaction import Interaction
+        original = getattr(Interaction, '_trigger_interaction_start_event', None)
+        if not callable(original):
+            _command_stats['last_error'] = 'interaction_start_event_missing'
+            return False
+        if getattr(original, '_kermp_native_lifecycle', False):
+            _native_interaction_lifecycle_installed = True
+            return True
+
+        def wrapped(self, *args, **kwargs):
+            result = original(self, *args, **kwargs)
+            try:
+                _native_interaction_started(self)
+            except Exception as exc:
+                _command_stats['last_error'] = 'interaction_start:%s:%s' % (
+                    type(exc).__name__, exc)
+            return result
+
+        wrapped._kermp_native_lifecycle = True
+        wrapped._kermp_original = original
+        Interaction._trigger_interaction_start_event = wrapped
+        _record_patch(Interaction, '_trigger_interaction_start_event', original)
+        _native_interaction_lifecycle_installed = True
+        return True
+    except Exception as exc:
+        _command_stats['last_error'] = 'interaction_lifecycle:%s:%s' % (
+            type(exc).__name__, exc)
+        return False
+
+
 def _native_pick_type(value, interaction_commands):
     pick_type = interaction_commands.PickType
     named = getattr(pick_type, str(value), None)
@@ -1017,12 +1117,16 @@ def _native_pick_type(value, interaction_commands):
 
 def _interaction_command(payload):
     """Replay an accepted typed command through its current EA handler."""
+    global _active_native_command
     if _sidecar_role != 'host':
         return
     request_id = str((payload or {}).get('request_id') or '')
     command = dict((payload or {}).get('command') or {})
-    _command_stats['last_command'] = command.get('name')
+    name = command.get('name')
+    _command_stats['last_command'] = name
     _command_stats['last_player_id'] = str((payload or {}).get('player_id') or '')
+    _command_stats['received'] += 1
+    _command_stat(name, 'received')
     try:
         import services
         from server_commands import interaction_commands
@@ -1035,7 +1139,11 @@ def _interaction_command(payload):
             raise ValueError('sim_not_loaded')
         remote_client = _remote_client_for(payload.get('player_id'), sim)
         connection = remote_client.id
-        name = command.get('name')
+        actionable = name in ('interactions.select', 'interactions.push',
+                              'interactions.push_targeting_sim_info')
+        queue_before = _queue_entries(sim) if actionable else {}
+        _active_native_command = {'request_id': request_id, 'sim_id': str(sim_id),
+                                  'name': name}
         if name == 'interactions.has_choices':
             args = list(command.get('args') or [])
             if len(args) != 12:
@@ -1054,8 +1162,7 @@ def _interaction_command(payload):
             args = list(command.get('args') or [])
             if len(args) != 2:
                 raise ValueError('select_args_invalid')
-            interaction_commands.select_choice(int(args[0]), int(args[1]), connection)
-            result = True
+            result = interaction_commands.select_choice(int(args[0]), int(args[1]), connection)
         elif name == 'interactions.push':
             target = dict(command.get('target') or {})
             target_id = target.get('target_id') or target.get('target_sim_id')
@@ -1098,17 +1205,41 @@ def _interaction_command(payload):
             raise ValueError('command_not_allowed:%s' % name)
         if not result:
             raise ValueError('native_command_rejected')
+        _command_stats['result_truthy'] += 1
+        _command_stats['last_result_type'] = '%s.%s' % (
+            type(result).__module__, type(result).__name__)
+        _command_stat(name, 'result_truthy')
+        if actionable:
+            queue_after = _queue_entries(sim)
+            interaction = getattr(result, 'interaction', None)
+            if interaction is None:
+                new_ids = [value for value in queue_after if value not in queue_before]
+                if new_ids:
+                    interaction = queue_after[new_ids[0]]
+            interaction_id = str(getattr(interaction, 'id', '') or '')
+            if interaction_id and interaction_id in queue_after:
+                request = {'request_id': request_id, 'sim_id': str(sim_id), 'name': name}
+                _native_interaction_requests[interaction_id] = request
+                _command_stats['queue_created'] += 1
+                _command_stats['last_interaction_id'] = interaction_id
+                _command_stat(name, 'queue_created')
+                bridge.emit('interaction.queued', {
+                    'request_id': request_id, 'sim_id': str(sim_id),
+                    'interaction_id': interaction_id, 'command': name,
+                    'signal': 'sim.queue membership',
+                })
         _command_stats['replayed'] += 1
+        _command_stat(name, 'replayed')
         _command_stats['last_error'] = None
-        bridge.emit('interaction.started', {'request_id': request_id, 'sim_id': str(sim_id),
-                                            'interaction_id': str(getattr(result, 'id', '')),
-                                            'command': name})
     except Exception as exc:
         _command_stats['rejected'] += 1
+        _command_stat(name, 'rejected')
         reason = 'native_command:%s:%s' % (type(exc).__name__, exc)
         _command_stats['last_error'] = reason
         bridge.emit('interaction.rejected', {'request_id': request_id, 'sim_id': payload.get('sim_id'),
                                              'command': command.get('name'), 'reason': reason})
+    finally:
+        _active_native_command = None
 
 
 def _configure_simulation_authority(role):
@@ -1791,6 +1922,15 @@ def _interaction_started(payload):
         _interaction_request_by_id[request_id]['interaction_id'] = str(interaction_id)
 
 
+def _interaction_queued(payload):
+    _interaction_stats['queued'] += 1
+    payload = payload or {}
+    request_id = str(payload.get('request_id') or '')
+    interaction_id = payload.get('interaction_id')
+    if request_id and interaction_id and request_id in _interaction_request_by_id:
+        _interaction_request_by_id[request_id]['interaction_id'] = str(interaction_id)
+
+
 def _interaction_cancel(payload):
     if _sidecar_role != 'host':
         return
@@ -2029,9 +2169,19 @@ def _interaction_request(payload):
         result = sim.push_super_affordance(affordance, target, context, **interaction_kwargs)
         if not result:
             raise ValueError('push_rejected')
-        bridge.emit('interaction.started', {'request_id': request_id, 'sim_id': payload.get('sim_id'),
-                                            'interaction_id': str(getattr(result, 'id', ''))})
-        _log('KERMP INTERACTION STARTED request=%s sim=%s affordance=%s target=%s' %
+        interaction = getattr(result, 'interaction', None)
+        interaction_id = str(getattr(interaction, 'id', '') or '')
+        if interaction_id and interaction_id in _queue_entries(sim):
+            _native_interaction_requests[interaction_id] = {
+                'request_id': request_id, 'sim_id': str(payload.get('sim_id')),
+                'name': 'interaction.request',
+            }
+            bridge.emit('interaction.queued', {
+                'request_id': request_id, 'sim_id': payload.get('sim_id'),
+                'interaction_id': interaction_id, 'command': 'interaction.request',
+                'signal': 'sim.queue membership',
+            })
+        _log('KERMP INTERACTION QUEUED request=%s sim=%s affordance=%s target=%s' %
              (request_id, payload.get('sim_id'), payload.get('affordance_id'), payload.get('target_id')))
     except _InteractionResolutionError as exc:
         stage = exc.stage

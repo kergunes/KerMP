@@ -4,6 +4,7 @@ import sims4.commands
 import services
 
 from . import hooks
+from . import interaction_trace
 from .hooks import (bridge, probe_wall_contours, wall_event_probe, enumerate_sims,
                     enumerate_objects, enumerate_affordances, inspect_distributor_boundary)
 from .hooks import _serialize_transform, _object_value, _object_household_id
@@ -20,6 +21,75 @@ def _native_module():
 
 def _out(connection):
     return sims4.commands.CheatOutput(connection)
+
+
+@sims4.commands.Command('kermp.trace.start', command_type=sims4.commands.CommandType.Live)
+def kermp_trace_start(_connection=None):
+    state = interaction_trace.start()
+    _out(_connection)('trace session=%s enabled=%s patched=%s errors=%s' %
+                      (state['session'], state['enabled'], state['patched'],
+                       len(state['errors'])))
+
+
+@sims4.commands.Command('kermp.trace.stop', command_type=sims4.commands.CommandType.Live)
+def kermp_trace_stop(_connection=None):
+    state = interaction_trace.stop()
+    path = interaction_trace.dump_to_file()
+    _out(_connection)('trace session=%s enabled=%s events=%s errors=%s file=%s' %
+                      (state['session'], state['enabled'], state['events'],
+                       len(state['errors']), path))
+
+
+@sims4.commands.Command('kermp.trace.status', command_type=sims4.commands.CommandType.Live)
+def kermp_trace_status(_connection=None):
+    state = interaction_trace.status()
+    out = _out(_connection)
+    out('trace session=%s enabled=%s events=%s/%s patched=%s errors=%s' %
+        (state['session'], state['enabled'], state['events'], state['max_events'],
+         state['patched'], len(state['errors'])))
+    out('trace counts=%s' % json.dumps(state['counts'], sort_keys=True))
+    for error in state['errors'][:12]:
+        out('trace error=%s' % error)
+
+
+@sims4.commands.Command('kermp.trace.mark', command_type=sims4.commands.CommandType.Live)
+def kermp_trace_mark(label: str = 'user_selection', _connection=None):
+    interaction_trace.mark(label)
+    _out(_connection)('trace mark=%s' % label)
+
+
+@sims4.commands.Command('kermp.trace.dump', command_type=sims4.commands.CommandType.Live)
+def kermp_trace_dump(limit: int = 200, _connection=None):
+    out = _out(_connection)
+    values = interaction_trace.events(max(1, min(int(limit), 512)))
+    path = interaction_trace.dump_to_file(max(1, min(int(limit), 512)))
+    out('trace dump events=%s file=%s' % (len(values), path))
+    for event in values:
+        out(json.dumps(event, sort_keys=True, separators=(',', ':')))
+
+
+@sims4.commands.Command('kermp.trace.registry', command_type=sims4.commands.CommandType.Live)
+def kermp_trace_registry(_connection=None):
+    out = _out(_connection)
+    snapshot = interaction_trace.registry_snapshot()
+    out('registry type=%s methods=%s' %
+        (snapshot['registry_type'], ','.join(snapshot['registry_methods']) or 'none'))
+    for name, info in sorted(snapshot['handlers'].items()):
+        out('handler %s=%s' % (name, json.dumps(info, sort_keys=True,
+                                                separators=(',', ':'))))
+    for term, values in sorted(snapshot['described'].items()):
+        out('registry term=%s values=%s' %
+            (term, json.dumps(values, sort_keys=True, separators=(',', ':'))))
+
+
+@sims4.commands.Command('kermp.trace.clients', command_type=sims4.commands.CommandType.Live)
+def kermp_trace_clients(_connection=None):
+    out = _out(_connection)
+    snapshot = interaction_trace.client_snapshot()
+    out('clients distributor_client_id=%s error=%s' %
+        (snapshot['distributor_client_id'], snapshot['error'] or 'none'))
+    for client in snapshot['clients']:
+        out(json.dumps(client, sort_keys=True, separators=(',', ':')))
 
 
 @sims4.commands.Command('kermp.status', command_type=sims4.commands.CommandType.Live)
@@ -98,18 +168,24 @@ def kermp_play_status(_connection=None):
         (getattr(hooks, '_game_message_capture_installed', False), cap.get('observed'),
          cap.get('replicated'), cap.get('dropped_local'), cap.get('dropped_local_ops'),
          (cap.get('last_error') or 'none').splitlines()[0] if cap.get('last_error') else 'none'))
-    out('INTERACTION intercepted=%s sent=%s accepted=%s delivered=%s apply_accepted=%s apply_rejected=%s rejected=%s started=%s last_affordance=%s last_target=%s last_sim=%s error=%s' %
+    out('INTERACTION intercepted=%s sent=%s accepted=%s delivered=%s apply_accepted=%s apply_rejected=%s rejected=%s queued=%s started=%s last_affordance=%s last_target=%s last_sim=%s error=%s' %
         (inter.get('forwarded'), inter.get('sent'), inter.get('accepted'), inter.get('delivered'),
-         inter.get('apply_accepted'), inter.get('apply_rejected'), inter.get('rejected'), inter.get('started'),
+         inter.get('apply_accepted'), inter.get('apply_rejected'), inter.get('rejected'), inter.get('queued'),
+         inter.get('started'),
          inter.get('last_affordance_id'), inter.get('last_target_id'), inter.get('last_sim_id'),
          (inter.get('last_error') or 'none').splitlines()[0] if inter.get('last_error') else 'none'))
-    out('NATIVE_COMMAND installed=%s captured=%s forwarded=%s fallback=%s replayed=%s rejected=%s remote_clients=%s remote_stage=%s remote_registration=%s last_command=%s last_player=%s remote_client_id=%s error=%s' %
+    out('NATIVE_COMMAND installed=%s captured=%s forwarded=%s fallback=%s received=%s replayed=%s result_truthy=%s queue_created=%s interaction_started=%s rejected=%s remote_clients=%s remote_stage=%s remote_registration=%s last_command=%s last_result=%s last_interaction=%s last_player=%s remote_client_id=%s error=%s' %
         (command.get('installed'), command.get('captured'), command.get('forwarded'), command.get('fallback'),
-         command.get('replayed'), command.get('rejected'), command.get('remote_clients'),
+         command.get('received'), command.get('replayed'), command.get('result_truthy'),
+         command.get('queue_created'), command.get('interaction_started'), command.get('rejected'),
+         command.get('remote_clients'),
          command.get('remote_client_stage') or 'none', command.get('remote_client_registration') or 'unknown',
-         command.get('last_command') or 'none', command.get('last_player_id') or 'none',
+         command.get('last_command') or 'none', command.get('last_result_type') or 'none',
+         command.get('last_interaction_id') or 'none', command.get('last_player_id') or 'none',
          command.get('last_remote_client_id') or 'none',
          (command.get('last_error') or 'none').splitlines()[0] if command.get('last_error') else 'none'))
+    out('NATIVE_COMMAND_BY_NAME=%s' % json.dumps(command.get('by_name') or {}, sort_keys=True,
+                                                 separators=(',', ':')))
     out('RX view_updates_received=%s TX view_updates_sent=%s' %
         (getattr(hooks, '_view_updates_received', 0), getattr(hooks, '_view_updates_sent', 0)))
     out('LOCAL_ACTIVE_SIM=%s' % (hooks._active_sim_id() or 'none'))

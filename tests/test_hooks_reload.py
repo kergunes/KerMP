@@ -549,6 +549,27 @@ def test_native_choice_capture_uses_native_pick_type_for_local_ea_call():
         assert local_calls[0][-1] == 7
 
 
+def test_native_interaction_started_requires_real_start_signal():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        emitted = []
+        hooks.bridge.emit = lambda name, payload: emitted.append((name, payload)) or True
+        interaction = types.SimpleNamespace(id=901)
+        hooks._native_interaction_requests['901'] = {
+            'request_id': 'req-1', 'sim_id': '77', 'name': 'interactions.select'}
+
+        hooks._native_interaction_started(interaction)
+
+        assert emitted == [('interaction.started', {
+            'request_id': 'req-1', 'sim_id': '77', 'interaction_id': '901',
+            'command': 'interactions.select',
+            'signal': 'Interaction._trigger_interaction_start_event'})]
+        assert hooks.command_status()['interaction_started'] == 1
+        assert hooks.command_status()['by_name']['interactions.select']['interaction_started'] == 1
+        hooks._native_interaction_started(interaction)
+        assert len(emitted) == 1
+
+
 def test_headless_remote_client_skips_stock_distributor_registration_and_tears_down():
     with HooksSandbox() as sandbox:
         hooks = sandbox.hooks

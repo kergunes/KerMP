@@ -13,7 +13,8 @@ import sys
 
 import sims4.commands
 
-_RELOAD_ORDER = ('bridge_client', 'build_adapter', 'hooks', 'lifecycle_guard', 'commands')
+_RELOAD_ORDER = ('bridge_client', 'build_adapter', 'interaction_trace', 'hooks',
+                 'lifecycle_guard', 'commands')
 
 
 def _out(connection):

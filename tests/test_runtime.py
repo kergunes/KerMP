@@ -213,6 +213,42 @@ def test_client_clock_state_is_delivered_to_game_bridge():
     asyncio.run(run())
 
 
+def test_client_interaction_queued_is_delivered_to_game_bridge():
+    async def run():
+        client = KerMPClient('c', 'Client', '127.0.0.1', 0)
+        rt = ClientRuntime(client, bridge_port=0)
+        received = []
+        rt.bridge.send = lambda typ, payload=None: (received.append((typ, payload)), True)[1]
+        env = Envelope.make(MessageType.INTERACTION_QUEUED, {
+            'request_id': 'r1', 'sim_id': '77', 'interaction_id': '901',
+            'command': 'interactions.select'}, 'h')
+
+        await rt._on_network_message(env)
+
+        assert received == [(MessageType.INTERACTION_QUEUED.value, env.payload)]
+    asyncio.run(run())
+
+
+def test_host_interaction_queued_updates_request_and_broadcasts():
+    async def run():
+        host = KerMPHost('h', 'Host', '127.0.0.1', 0)
+        host.session.interaction_requests['r1'] = {'status': 'accepted'}
+        rt = HostRuntime(host, bridge_port=0)
+        broadcast = []
+
+        async def fake_broadcast(typ, payload=None, include_host=False):
+            broadcast.append((typ, payload, include_host))
+
+        host.broadcast = fake_broadcast
+        payload = {'request_id': 'r1', 'sim_id': '77', 'interaction_id': '901'}
+
+        await rt._on_game_event(BridgeEvent(MessageType.INTERACTION_QUEUED.value, payload))
+
+        assert host.session.interaction_requests['r1']['status'] == 'queued'
+        assert broadcast == [(MessageType.INTERACTION_QUEUED, payload, False)]
+    asyncio.run(run())
+
+
 def test_host_build_operation_not_echoed_back():
     async def run():
         host = KerMPHost("h", "Host", "127.0.0.1", 0)

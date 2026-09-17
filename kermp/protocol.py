@@ -67,6 +67,7 @@ class MessageType(str, Enum):
     INTERACTION_REQUEST = "interaction.request"
     INTERACTION_ACCEPTED = "interaction.accepted"
     INTERACTION_REJECTED = "interaction.rejected"
+    INTERACTION_QUEUED = "interaction.queued"
     INTERACTION_STARTED = "interaction.started"
     INTERACTION_FINISHED = "interaction.finished"
     INTERACTION_CANCEL = "interaction.cancel"

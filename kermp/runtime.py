@@ -228,7 +228,8 @@ class HostRuntime:
             return
         if event.type in (MessageType.INTERACTION_ACCEPTED.value, MessageType.INTERACTION_REJECTED.value,
                           MessageType.INTERACTION_COMMAND_ACCEPTED.value, MessageType.INTERACTION_COMMAND_REJECTED.value,
-                          MessageType.INTERACTION_STARTED.value, MessageType.INTERACTION_FINISHED.value):
+                          MessageType.INTERACTION_QUEUED.value, MessageType.INTERACTION_STARTED.value,
+                          MessageType.INTERACTION_FINISHED.value):
             request_id = str(event.payload.get("request_id") or "")
             if request_id in self.host.session.interaction_requests:
                 self.host.session.interaction_requests[request_id]["status"] = event.type.rsplit('.', 1)[-1]
@@ -272,7 +273,8 @@ class HostRuntime:
                 await self.host.broadcast(MessageType.INTERACTION_COMMAND_REJECTED, failure)
         elif env.type == MessageType.INTERACTION_CANCEL.value:
             self.bridge.send(MessageType.INTERACTION_CANCEL.value, env.payload)
-        elif env.type in (MessageType.INTERACTION_REJECTED.value, MessageType.INTERACTION_STARTED.value,
+        elif env.type in (MessageType.INTERACTION_REJECTED.value, MessageType.INTERACTION_QUEUED.value,
+                          MessageType.INTERACTION_STARTED.value,
                           MessageType.INTERACTION_FINISHED.value, MessageType.INTERACTION_COMMAND_REJECTED.value,
                           MessageType.ERROR.value):
             self.bridge.send(env.type, env.payload)
@@ -532,7 +534,8 @@ class ClientRuntime:
         elif env.type in (MessageType.SIM_STATE.value, MessageType.SIM_SELECTION_STATE.value,
                           MessageType.INTERACTION_ACCEPTED.value, MessageType.INTERACTION_REJECTED.value,
                           MessageType.INTERACTION_COMMAND_ACCEPTED.value, MessageType.INTERACTION_COMMAND_REJECTED.value,
-                          MessageType.INTERACTION_STARTED.value, MessageType.INTERACTION_FINISHED.value,
+                          MessageType.INTERACTION_QUEUED.value, MessageType.INTERACTION_STARTED.value,
+                          MessageType.INTERACTION_FINISHED.value,
                           MessageType.INTERACTION_CANCEL.value):
             self.bridge.send(env.type, env.payload)
         elif env.type == MessageType.ERROR.value:
