@@ -2,7 +2,7 @@ import asyncio
 
 from kermp.bridge import BridgeEvent
 from kermp.net import KerMPHost, KerMPClient
-from kermp.protocol import MessageType
+from kermp.protocol import Envelope, MessageType
 from kermp.runtime import HostRuntime, ClientRuntime
 from kermp.session import HostSession
 
@@ -123,6 +123,55 @@ def test_client_readiness_transitions_on_simulation_authority():
         await rt._on_game_event(BridgeEvent("simulation.authority", {"role": "client", "installed": False}))
         assert any(t == MessageType.READINESS and p.get("simulation_authority_ready") is False
                    for t, p in sent)
+    asyncio.run(run())
+
+
+def test_client_clock_requests_are_forwarded_to_host():
+    async def run():
+        client = KerMPClient('c', 'Client', '127.0.0.1', 0)
+        rt = ClientRuntime(client, bridge_port=0)
+        sent = []
+
+        async def fake_send(typ, payload=None):
+            sent.append((typ, payload or {}))
+
+        client.send = fake_send
+        await rt._on_game_event(BridgeEvent(MessageType.CLOCK_REQUEST_SPEED.value, {'speed': 3}))
+        await rt._on_game_event(BridgeEvent(MessageType.CLOCK_REQUEST_PAUSE.value, {'paused': False}))
+        assert sent == [
+            (MessageType.CLOCK_REQUEST_SPEED, {'speed': 3}),
+            (MessageType.CLOCK_REQUEST_PAUSE, {'paused': False}),
+        ]
+    asyncio.run(run())
+
+
+def test_host_local_clock_state_is_broadcast_without_double_applying():
+    async def run():
+        host = KerMPHost('h', 'Host', '127.0.0.1', 0)
+        rt = HostRuntime(host, bridge_port=0)
+        broadcast = []
+
+        async def fake_broadcast(typ, payload=None, include_host=False):
+            broadcast.append((typ, payload, include_host))
+
+        host.broadcast = fake_broadcast
+        await rt._on_game_event(BridgeEvent('clock.state', {'speed': 2, 'paused': False}))
+        assert host.session.clock['speed'] == 2
+        assert host.session.clock['paused'] is False
+        assert broadcast[-1][0] == MessageType.CLOCK_STATE
+        assert broadcast[-1][2] is False
+    asyncio.run(run())
+
+
+def test_client_clock_state_is_delivered_to_game_bridge():
+    async def run():
+        client = KerMPClient('c', 'Client', '127.0.0.1', 0)
+        rt = ClientRuntime(client, bridge_port=0)
+        received = []
+        rt.bridge.send = lambda typ, payload=None: (received.append((typ, payload)), True)[1]
+        env = Envelope.make(MessageType.CLOCK_STATE, {'sequence': 4, 'speed': 1, 'paused': False}, 'h')
+        await rt._on_network_message(env)
+        assert received == [(MessageType.CLOCK_STATE.value, env.payload)]
     asyncio.run(run())
 
 

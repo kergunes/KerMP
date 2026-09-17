@@ -53,6 +53,16 @@ class HostRuntime:
                                                            simulation_authority_ready=True)
             await self.host.broadcast(MessageType.READINESS, {"player_id": self.host.player_id, **readiness.snapshot()})
             return
+        if event.type == "clock.state":
+            state = dict(event.payload or {})
+            speed = int(state.get("speed", self.host.session.clock.get("speed", 1)))
+            if speed not in (0, 1, 2, 3):
+                return
+            self.host.session.clock.update(
+                sequence=self.host.session.clock["sequence"] + 1,
+                speed=speed, paused=(speed == 0))
+            await self.host.broadcast(MessageType.CLOCK_STATE, dict(self.host.session.clock), include_host=False)
+            return
 
         if event.type == MessageType.GAME_RAW_MESSAGE.value:
             try:
@@ -210,6 +220,8 @@ class HostRuntime:
                 await self.host.broadcast(MessageType.TRAVEL_ABORT, {
                     'txn_id': txn.txn_id, 'epoch': txn.epoch,
                     'reason': env.payload.get('reason', 'participant_abort')})
+        elif env.type == MessageType.CLOCK_STATE.value:
+            self.bridge.send(MessageType.CLOCK_STATE.value, env.payload)
         elif env.type == MessageType.BUILD_APPLY.value:
             self.bridge.send(MessageType.BUILD_APPLY.value, env.payload)
         elif env.type in (MessageType.SIM_SELECTION_STATE.value, MessageType.SIM_STATE.value):
@@ -326,6 +338,12 @@ class ClientRuntime:
             authority_ready = bool(status.get("role") == "client" and status.get("installed"))
             await self.client.send(MessageType.READINESS, {"bridge_connected": True,
                 "simulation_authority_ready": authority_ready})
+            return
+        if event.type == MessageType.CLOCK_REQUEST_SPEED.value:
+            await self.client.send(MessageType.CLOCK_REQUEST_SPEED, event.payload)
+            return
+        if event.type == MessageType.CLOCK_REQUEST_PAUSE.value:
+            await self.client.send(MessageType.CLOCK_REQUEST_PAUSE, event.payload)
             return
         # A client only sends local input upstream; it never echoes host game messages.
         if event.type == MessageType.TRAVEL_REQUEST.value:
@@ -463,6 +481,8 @@ class ClientRuntime:
                 await self._flush_build()
         elif env.type == MessageType.BUILD_APPLY.value:
             self.bridge.send(MessageType.BUILD_APPLY.value, env.payload)
+        elif env.type == MessageType.CLOCK_STATE.value:
+            self.bridge.send(MessageType.CLOCK_STATE.value, env.payload)
         elif env.type in (MessageType.SIM_STATE.value, MessageType.SIM_SELECTION_STATE.value,
                           MessageType.INTERACTION_ACCEPTED.value, MessageType.INTERACTION_REJECTED.value,
                           MessageType.INTERACTION_STARTED.value, MessageType.INTERACTION_FINISHED.value,

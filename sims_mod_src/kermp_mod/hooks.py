@@ -64,6 +64,9 @@ _authoritative_controllers = {}
 _local_active_sim_id = None
 _interaction_request_by_id = {}
 _cancel_interception_installed = False
+_clock_hooks_installed = False
+_clock_apply_bypass = False
+_clock_status = {'installed': False, 'requests': 0, 'applied': 0, 'last_error': None}
 _interaction_stats = {'forwarded': 0, 'dropped': 0, 'last_affordance_id': None,
                       'last_target_id': None, 'last_sim_id': None, 'last_error': None,
                       'sent': 0, 'accepted': 0, 'rejected': 0, 'started': 0}
@@ -113,6 +116,7 @@ def install():
     bridge.on('interaction.cancel', _interaction_cancel)
     bridge.on('interaction.request', _interaction_request)
     bridge.on('game.raw_message', _raw_game_message)
+    bridge.on('clock.state', _clock_state)
     bridge.start()
     _install_build_buy_hooks()
     _install_object_build_hooks()
@@ -123,6 +127,7 @@ def install():
     _install_interaction_interception()
     _install_active_sim_hooks()
     _install_cancel_interception()
+    _install_clock_hooks()
     _log('KerMP installed')
 
 
@@ -133,7 +138,7 @@ def teardown():
     The caller should abort the reload on a non-empty result, because the
     runtime may otherwise be left in an unknown half-dismantled state.
     """
-    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed, _interaction_interception_installed, _active_sim_hook_installed, _last_published_active_sim_id, _cancel_interception_installed
+    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed, _interaction_interception_installed, _active_sim_hook_installed, _last_published_active_sim_id, _cancel_interception_installed, _clock_hooks_installed, _clock_apply_bypass
     errors = []
     # Stop accepting new bridge events first.
     try:
@@ -160,6 +165,8 @@ def teardown():
     _interaction_interception_installed = False
     _active_sim_hook_installed = False
     _cancel_interception_installed = False
+    _clock_hooks_installed = False
+    _clock_apply_bypass = False
     _last_published_active_sim_id = None
     _installed = False
     return errors
@@ -209,11 +216,124 @@ def _sidecar_welcome(payload):
     _sidecar_player_id = payload.get('player_id')
     _configure_simulation_authority(_sidecar_role)
     _install_active_sim_hooks()
+    _install_clock_hooks()
     try:
         _publish_active_sim_if_ready()
     except Exception:
         _log(traceback.format_exc())
     _log('Sidecar connected role=%s' % payload.get('role'))
+
+
+def _clock_speed_value(value):
+    try:
+        return int(getattr(value, 'value', value))
+    except (TypeError, ValueError):
+        name = str(getattr(value, 'name', value)).upper()
+        return {'PAUSED': 0, 'NORMAL': 1, 'SPEED2': 2, 'SPEED3': 3}.get(name, 1)
+
+
+def _clock_request(speed=None, paused=None):
+    global _clock_status
+    _clock_status['requests'] += 1
+    payload = {}
+    if speed is not None:
+        payload['speed'] = max(0, min(3, _clock_speed_value(speed)))
+        bridge.emit('clock.request_speed', payload)
+    else:
+        payload['paused'] = bool(paused)
+        bridge.emit('clock.request_pause', payload)
+
+
+def _clock_state(payload):
+    """Apply the host's clock decision to this Sims process."""
+    global _clock_apply_bypass
+    state = dict(payload or {})
+    speed = _clock_speed_value(state.get('speed', 0 if state.get('paused') else 1))
+    speed = 0 if bool(state.get('paused')) else max(1, min(3, speed))
+    try:
+        import services
+        service = services.game_clock_service()
+        import clock
+        mode = getattr(getattr(clock, 'ClockSpeedMode', None),
+                       {0: 'PAUSED', 1: 'NORMAL', 2: 'SPEED2', 3: 'SPEED3'}[speed])
+        source = getattr(getattr(clock, 'GameSpeedChangeSource', None), 'GAMEPLAY', None)
+        _clock_apply_bypass = True
+        setter = getattr(service, 'set_clock_speed')
+        try:
+            setter(mode, source=source, reason='KerMP authoritative clock', immediate=True)
+        except TypeError:
+            setter(mode)
+        _clock_status['applied'] += 1
+        _clock_status['last_error'] = None
+    except Exception as exc:
+        _clock_status['last_error'] = '%s: %s' % (type(exc).__name__, exc)
+        _log('KERMP CLOCK APPLY ERROR %s' % _clock_status['last_error'])
+    finally:
+        _clock_apply_bypass = False
+
+
+def _install_clock_hooks():
+    """Route every UI/game clock change through the host and replay its result."""
+    global _clock_hooks_installed
+    if _clock_hooks_installed:
+        return True
+    try:
+        import clock
+        game_clock = getattr(clock, 'GameClock', None)
+        if game_clock is None:
+            _clock_status['last_error'] = 'game_clock_missing'
+            return False
+        for name in ('set_clock_speed', 'push_speed', 'pop_speed'):
+            original = getattr(game_clock, name, None)
+            if not callable(original) or getattr(original, '_kermp_wrapped', False):
+                continue
+            if name == 'set_clock_speed':
+                def wrapped(self, speed, *args, **kwargs):
+                    if _clock_apply_bypass:
+                        return original_set(self, speed, *args, **kwargs)
+                    if _sidecar_role == 'client':
+                        _clock_request(speed=speed)
+                        return None
+                    result = original_set(self, speed, *args, **kwargs)
+                    bridge.emit('clock.state', {'speed': _clock_speed_value(speed), 'paused': _clock_speed_value(speed) == 0})
+                    return result
+                original_set = original
+            elif name == 'push_speed':
+                def wrapped(self, speed, *args, **kwargs):
+                    if _clock_apply_bypass:
+                        return original_push(self, speed, *args, **kwargs)
+                    if _sidecar_role == 'client':
+                        _clock_request(speed=speed)
+                        return None
+                    result = original_push(self, speed, *args, **kwargs)
+                    bridge.emit('clock.state', {'speed': _clock_speed_value(speed), 'paused': _clock_speed_value(speed) == 0})
+                    return result
+                original_push = original
+            else:
+                def wrapped(self, speed, *args, **kwargs):
+                    if _clock_apply_bypass:
+                        return original_pop(self, speed, *args, **kwargs)
+                    if _sidecar_role == 'client':
+                        _clock_request(paused=False)
+                        return None
+                    result = original_pop(self, speed, *args, **kwargs)
+                    bridge.emit('clock.state', {'speed': _clock_speed_value(speed), 'paused': False})
+                    return result
+                original_pop = original
+            wrapped._kermp_wrapped = True
+            wrapped._kermp_original = original
+            setattr(game_clock, name, wrapped)
+            _record_patch(game_clock, name, original)
+        _clock_hooks_installed = True
+        _clock_status['installed'] = True
+        return True
+    except Exception as exc:
+        _clock_status['last_error'] = '%s: %s' % (type(exc).__name__, exc)
+        return False
+
+
+def clock_status():
+    return dict(_clock_status)
 
 
 def _configure_simulation_authority(role):

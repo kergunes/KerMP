@@ -62,6 +62,7 @@ def kermp_play_status(_connection=None):
     out = _out(_connection)
     role = hooks._sidecar_role or 'unknown'
     sim = hooks.simulation_status()
+    clock = hooks.clock_status()
     cap = hooks.message_capture_status()
     inter = hooks.interaction_status()
     zone_id = 0
@@ -79,6 +80,9 @@ def kermp_play_status(_connection=None):
     out('SIM_AUTHORITY suppression_installed=%s available=%s local_enabled=%s bypass=%s error=%s' %
         (sim.get('installed'), sim.get('timeline_suppression_available'),
          sim.get('local_simulation_enabled'), sim.get('bypass'), sim.get('last_error') or 'none'))
+    out('CLOCK hooks_installed=%s source=%s requests=%s applied=%s error=%s' %
+        (clock.get('installed'), sim.get('clock_source'), clock.get('requests'),
+         clock.get('applied'), clock.get('last_error') or 'none'))
     out('OMEGA send_available=%s' % omega_send)
     out('CAPTURE installed=%s observed=%s replicated=%s dropped_local=%s dropped_local_ops=%s error=%s' %
         (getattr(hooks, '_game_message_capture_installed', False), cap.get('observed'),
