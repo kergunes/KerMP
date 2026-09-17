@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import os
+import json
 import py_compile
 import shutil
 import subprocess
@@ -21,6 +22,42 @@ def default_install_dir():
 
 INSTALL_DIR = default_install_dir()
 INSTALL_OUT = INSTALL_DIR / OUT.name
+
+
+def dev_watcher_running():
+    lock = INSTALL_DIR / '.kermp-dev.lock'
+    if not lock.exists():
+        return False
+    try:
+        payload = json.loads(lock.read_text(encoding='utf-8'))
+        pid = int(payload.get('pid', 0) or 0)
+    except Exception:
+        pid = 0
+    if pid > 0:
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            pass
+    try:
+        lock.unlink()
+    except OSError:
+        pass
+    return False
+
+
+def atomic_copy(source, destination):
+    temp = destination.with_name(destination.name + '.tmp-%s' % os.getpid())
+    try:
+        shutil.copy2(str(source), str(temp))
+        os.replace(str(temp), str(destination))
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def is_py37(exe):
@@ -81,7 +118,13 @@ def main():
             for src, arc in files:
                 z.write(str(src), arc)
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(OUT), str(INSTALL_OUT))
+    if os.environ.get('KERMP_KEEP_DEV_SCRIPTS') != '1':
+        if dev_watcher_running():
+            raise RuntimeError('KerMP dev watcher is running. Stop scripts\\devmode.bat before a release build.')
+        scripts_dir = INSTALL_DIR / 'Scripts'
+        if scripts_dir.exists():
+            shutil.rmtree(str(scripts_dir))
+    atomic_copy(OUT, INSTALL_OUT)
     print('Built %s' % OUT)
     print('Installed %s' % INSTALL_OUT)
 
