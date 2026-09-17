@@ -432,7 +432,7 @@ def _install_interaction_interception():
                 if target is None and args:
                     target = args[0]
                 target_id = _coerce_id(target)
-                sim_id = _coerce_id(self)
+                sim_id = _coerce_id(getattr(self, 'sim_info', None)) or _coerce_id(self)
                 if affordance_id is None:
                     _interaction_stats['dropped'] += 1
                     _interaction_stats['last_error'] = 'affordance_id_unresolved'

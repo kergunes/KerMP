@@ -111,6 +111,7 @@ class HooksSandbox:
         class Sim:
             def __init__(self):
                 self.id = 42
+                self.sim_info = types.SimpleNamespace(id=77)
 
             def push_super_affordance(self, affordance=None, *args, **kwargs):
                 sandbox.calls.append(('push', affordance))
@@ -300,7 +301,7 @@ def test_client_interaction_forwarded_not_executed():
         assert len(requests) == 1
         assert requests[0]['affordance_id'] == '123'
         assert requests[0]['target_id'] == '7'
-        assert requests[0]['sim_id'] == '42'
+        assert requests[0]['sim_id'] == '77'
 
 
 def test_host_interaction_executes_locally():
@@ -313,3 +314,17 @@ def test_host_interaction_executes_locally():
         result = sim.push_super_affordance(affordance)
         assert result == 'result'
         assert sandbox.calls == [('push', affordance)]
+
+
+def test_client_interaction_unresolvable_affordance_is_dropped():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        hooks._sidecar_role = 'client'
+        assert hooks._install_interaction_interception() is True
+        emitted = []
+        hooks.bridge.emit = lambda t, p: emitted.append((t, p)) or True
+        sim = sandbox.sim_mod.Sim()
+        result = sim.push_super_affordance(types.SimpleNamespace())  # no guid64/id
+        assert result is None
+        assert not any(t == 'interaction.request' for t, _ in emitted)
+        assert hooks.interaction_status()['dropped'] == 1
