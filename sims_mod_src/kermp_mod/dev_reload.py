@@ -221,6 +221,7 @@ def _prepare(module_name):
 
 def _restore_entry(entry):
     module = entry['module']
+    failed_namespace = dict(module.__dict__)
     reload_core.restore_module(module, entry['snapshot'])
     if entry['name'] == 'kermp_mod.hooks':
         # Reinstall the old generation so refreshed monkey patches point back at
@@ -229,6 +230,10 @@ def _restore_entry(entry):
         install = module.__dict__.get('install')
         if callable(install):
             install()
+    # Reverse any reference migration already performed by Sims reload
+    # bookkeeping. This is harmless when the failed generation never reached
+    # update_module_dict and closes the partial-commit case when it did.
+    sims4.reload.update_module_dict(failed_namespace, module.__dict__)
 
 
 def _health(entry):
