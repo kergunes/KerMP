@@ -121,6 +121,39 @@ def _pending_request():
     return _read_json(_json_path('.kermp-reload-request.json'))
 
 
+def _manifest():
+    return _read_json(_json_path('.kermp-dev-manifest.json'))
+
+
+def _validate_published_generation(request):
+    manifest = _manifest()
+    request_generation = int(request.get('generation', 0) or 0)
+    manifest_generation = int(manifest.get('generation', 0) or 0)
+    if request_generation <= 0 or manifest_generation != request_generation:
+        raise RuntimeError('generation_manifest_mismatch:request=%s:manifest=%s' %
+                           (request_generation, manifest_generation))
+    expected = manifest.get('files')
+    if not isinstance(expected, dict):
+        raise RuntimeError('generation_manifest_files_missing')
+    root = _find_source_root()
+    if not root:
+        raise RuntimeError('dev_source_root_missing')
+    actual = {}
+    for base, _dirs, files in os.walk(root):
+        for filename in files:
+            if not filename.endswith('.py'):
+                continue
+            path = os.path.join(base, filename)
+            relative = os.path.relpath(path, root).replace(os.sep, '/')
+            actual[relative] = reload_core.sha256_file(path)
+    if set(actual) != set(expected):
+        raise RuntimeError('generation_file_set_mismatch')
+    for relative, digest in expected.items():
+        if actual.get(relative) != digest:
+            raise RuntimeError('generation_hash_mismatch:%s' % relative)
+    return manifest
+
+
 def _last_ack():
     return _read_json(_json_path('.kermp-reload-ack.json'))
 
@@ -221,12 +254,18 @@ def _reload_modules(module_names):
         return {'ok': True, 'modules': [], 'generation': runtime.reload_generation}
 
     applied = []
-    bridge.pause_dispatch()
+    if not bridge.pause_dispatch(5.0):
+        bridge.resume_dispatch()
+        raise RuntimeError('bridge_dispatch_quiesce_timeout')
     runtime.reload_in_progress = True
+    result_payload = None
     try:
         for entry in prepared:
             module = entry['module']
             reload_core.exec_module_code(module, entry['code'])
+            # From this point onward every failure must roll this generation
+            # back, including failures inside install() or Sims bookkeeping.
+            applied.append(entry)
             for name, value in entry['preserve'].items():
                 module.__dict__[name] = value
             if entry['name'] == 'kermp_mod.hooks':
@@ -235,7 +274,6 @@ def _reload_modules(module_names):
             if callable(install):
                 install()
             sims4.reload.update_module_dict(entry['snapshot'], module.__dict__)
-            applied.append(entry)
 
         health = {}
         for entry in prepared:
@@ -253,7 +291,7 @@ def _reload_modules(module_names):
             'hashes': {entry['name']: entry['sha256'] for entry in prepared},
             'health': health,
         }
-        return dict(runtime.last_reload)
+        result_payload = dict(runtime.last_reload)
     except Exception as exc:
         for entry in reversed(applied):
             _restore_entry(entry)
@@ -267,7 +305,12 @@ def _reload_modules(module_names):
         raise
     finally:
         runtime.reload_in_progress = False
-        bridge.resume_dispatch()
+        resume_errors = bridge.resume_dispatch()
+        if resume_errors:
+            runtime.last_reload['resume_dispatch_errors'] = resume_errors
+            if result_payload is not None:
+                result_payload['resume_dispatch_errors'] = resume_errors
+    return result_payload
 
 
 def _write_ack(request, result, restart_required):
@@ -341,6 +384,12 @@ def kermp_reload(module: str = '', _connection=None):
             if ack.get('restart_required'):
                 output('Restart still required for: %s' % ','.join(ack.get('restart_required')))
             return
+        try:
+            _validate_published_generation(request)
+        except Exception as exc:
+            output('KerMP reload REFUSED: %s: %s' % (type(exc).__name__, exc))
+            output('Published source generation is incomplete or inconsistent; runtime unchanged.')
+            return
         names, restart_required = _request_modules(request)
 
     if not names:
@@ -363,7 +412,7 @@ def kermp_reload(module: str = '', _connection=None):
         result = {'ok': False, 'modules': names, 'error': '%s: %s' % (type(exc).__name__, exc)}
         _write_ack(request, result, restart_required)
         output('KerMP reload FAILED: %s' % result['error'])
-        output('Previous module namespace restored; inspect KerMP log before retrying.')
+        output('Runtime remains on the previous accepted generation; inspect KerMP log before retrying.')
 
 
 @sims4.commands.Command('kermp.reload.all', command_type=sims4.commands.CommandType.Live)
