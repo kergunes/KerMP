@@ -946,19 +946,25 @@ def inspect_wall_contour_callback():
 
 
 def _install_wall_contour_callback():
-    """Register one persistent dispatcher into the Zone callback collection."""
+    """Register the stable dispatcher once per live Zone instance."""
     global _wall_callback_registered
-    if runtime.registrations.get('wall_contour_callback'):
+    try:
+        import services
+        zone = services.current_zone()
+        zone_token = id(zone) if zone is not None else None
+    except Exception:
+        zone = None
+        zone_token = None
+    if zone_token is not None and runtime.registrations.get('wall_contour_zone') == zone_token:
         _wall_callback_registered = True
         result = inspect_wall_contour_callback()
         result['registered'] = True
         return result
     result = inspect_wall_contour_callback()
-    if _wall_callback_registered or not result.get('attribute_exists'):
+    if zone is None or not result.get('attribute_exists'):
         return result
     try:
-        import services
-        callbacks = getattr(services.current_zone(), 'wall_contour_update_callbacks')
+        callbacks = getattr(zone, 'wall_contour_update_callbacks')
         method_name = None
         method = getattr(callbacks, 'append', None)
         if callable(method):
@@ -970,7 +976,7 @@ def _install_wall_contour_callback():
         if method is None:
             return result
         method(wall_contour_dispatch)
-        runtime.registrations['wall_contour_callback'] = True
+        runtime.registrations['wall_contour_zone'] = zone_token
         _wall_callback_registered = True
         result['registration_method'] = method_name
         result['registered'] = True
@@ -1401,6 +1407,10 @@ def _install_zone_hooks():
 
 def _after_zone_spin_up():
     global _pending_travel_txn, _travel_batch_complete, _travel_local_zone_loaded
+    try:
+        _install_wall_contour_callback()
+    except Exception:
+        _log('KERMP wall callback refresh after zone spin-up failed: %s' % traceback.format_exc())
     if not _pending_travel_txn:
         return
     try:
