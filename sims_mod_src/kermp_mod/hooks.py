@@ -1210,8 +1210,7 @@ def _deserialize_location(data, fallback=None):
         if transform is None:
             return fallback
         surface = _deserialize_routing_surface(data.get('routing_surface'), fallback)
-        return routing.Location(transform.translation, transform.orientation,
-                                routing_surface=surface)
+        return routing.Location(transform, surface)
     except Exception:
         return fallback
 
@@ -1311,10 +1310,17 @@ def _apply_object_location(obj, object_id, zone_id, data):
         location = _deserialize_location(data.get('transform'), previous)
         if location is None:
             raise ValueError('location_unavailable')
-        obj.location = location
-        resend = getattr(obj, 'resend_location', None)
-        if callable(resend):
-            resend()
+        try:
+            obj.location = location
+        except Exception as exc:
+            raise TypeError('location_assignment:%s:%s' % (type(exc).__name__, exc))
+        if not _position_matches(obj, data.get('transform')):
+            resend = getattr(obj, 'resend_location', None)
+            if callable(resend):
+                try:
+                    resend()
+                except Exception as exc:
+                    raise TypeError('location_resend:%s:%s' % (type(exc).__name__, exc))
     if not _position_matches(obj, data.get('transform')):
         raise ValueError('move_postcondition_failed')
 
