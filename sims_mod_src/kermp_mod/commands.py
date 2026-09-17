@@ -130,6 +130,48 @@ def _inspect_attr(obj, name, fallback='unknown'):
         return fallback
 
 
+def _inspect_mapping_value(value, name, fallback=None):
+    try:
+        return value[name]
+    except Exception:
+        return fallback
+
+
+def _inspect_components(value, names):
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)) and len(value) >= len(names):
+        return [value[index] for index in range(len(names))]
+    if isinstance(value, dict):
+        result = [_inspect_mapping_value(value, name) for name in names]
+    else:
+        result = [_inspect_attr(value, name, None) for name in names]
+    return None if any(item is None for item in result) else result
+
+
+def _inspect_transform(obj):
+    location = _inspect_attr(obj, 'location', None)
+    serialized = None
+    try:
+        serialized = _serialize_transform(location)
+    except Exception:
+        pass
+    if not isinstance(serialized, dict):
+        serialized = {}
+    position = _inspect_mapping_value(serialized, 'translation')
+    orientation = _inspect_mapping_value(serialized, 'orientation')
+    routing_surface = _inspect_mapping_value(serialized, 'routing_surface')
+    if position is None:
+        position = _inspect_components(_inspect_attr(obj, 'position', None), ('x', 'y', 'z'))
+    if orientation is None:
+        orientation = _inspect_components(_inspect_attr(obj, 'orientation', None), ('x', 'y', 'z', 'w'))
+    if routing_surface is None:
+        routing_surface = _inspect_attr(obj, 'routing_surface', 'unknown')
+    return (position or ['unknown', 'unknown', 'unknown'],
+            orientation or ['unknown', 'unknown', 'unknown', 'unknown'],
+            routing_surface)
+
+
 def _inspect_object_lines(obj):
     definition = _inspect_attr(obj, 'definition', None)
     definition_id = _inspect_attr(definition, 'id', None)
@@ -140,17 +182,11 @@ def _inspect_object_lines(obj):
         name = _inspect_attr(definition, 'name', None)
     if name is None and definition is not None:
         name = _inspect_attr(definition, 'display_name', 'unknown')
-    location = _inspect_attr(obj, 'location', None)
-    transform = _serialize_transform(location) or {}
-    position = transform.get('translation') or ['unknown', 'unknown', 'unknown']
-    orientation = transform.get('orientation') or ['unknown', 'unknown', 'unknown', 'unknown']
+    position, orientation, routing_surface = _inspect_transform(obj)
     parent = _inspect_attr(obj, 'parent', None)
     parent_id = _inspect_attr(parent, 'id', None) if parent is not None else None
     if parent_id is None:
         parent_id = _inspect_attr(obj, 'parent_id', 'none')
-    routing_surface = transform.get('routing_surface')
-    if routing_surface is None:
-        routing_surface = _inspect_attr(obj, 'routing_surface', 'unknown')
     if isinstance(routing_surface, (dict, list, tuple)):
         routing_surface = json.dumps(routing_surface, sort_keys=True, separators=(',', ':'))
     return [
