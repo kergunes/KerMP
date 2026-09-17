@@ -147,7 +147,9 @@ class HostRuntime:
                 return
             payload = {"op_seq": op.seq, "op_id": op.data.get("op_id"),
                        "player_id": op.player_id, "op": op.op, "data": op.data}
-            self.bridge.send(MessageType.BUILD_APPLY.value, payload)
+            # The host's game already applied this operation natively before it was
+            # captured, so it is not echoed back (echoing would double-apply). Only
+            # remote clients apply it.
             await self.host.broadcast(MessageType.BUILD_APPLY, payload)
             return
 

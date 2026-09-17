@@ -72,3 +72,23 @@ def test_client_readiness_transitions_on_simulation_authority():
         assert any(t == MessageType.READINESS and p.get("simulation_authority_ready") is False
                    for t, p in sent)
     asyncio.run(run())
+
+
+def test_host_build_operation_not_echoed_back():
+    async def run():
+        host = KerMPHost("h", "Host", "127.0.0.1", 0)
+        rt = HostRuntime(host, bridge_port=0)
+        rt.loop = asyncio.get_running_loop()
+        bridge_sent = []
+        rt.bridge.send = lambda typ, payload=None: (bridge_sent.append(typ), True)[1]
+        broadcast = []
+
+        async def fake_broadcast(typ, payload=None, include_host=False):
+            broadcast.append(typ)
+
+        host.broadcast = fake_broadcast
+        await rt._on_game_event(BridgeEvent("build.operation",
+                                            {"op": "object.create", "data": {"definition_id": "2"}}))
+        assert MessageType.BUILD_APPLY in broadcast
+        assert MessageType.BUILD_APPLY not in bridge_sent
+    asyncio.run(run())
