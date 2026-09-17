@@ -314,6 +314,12 @@ class ClientRuntime:
         if event.type == MessageType.SIM_SELECT.value:
             await self.client.send(MessageType.SIM_SELECT, event.payload)
             return
+        if event.type in ("sims.state", MessageType.SIM_STATE.value):
+            await self.client.send(MessageType.SIM_STATE, {"sims": list(event.payload.get("sims") or [])})
+            active_sim_id = event.payload.get("active_sim_id")
+            if active_sim_id not in (None, "", 0, "0"):
+                await self.client.send(MessageType.SIM_SELECT, {"sim_id": str(active_sim_id), "local": True})
+            return
         if event.type == MessageType.INTERACTION_REQUEST.value:
             await self.client.send(MessageType.INTERACTION_REQUEST, event.payload)
             return
@@ -434,6 +440,10 @@ class ClientRuntime:
                 await self._flush_build()
         elif env.type == MessageType.BUILD_APPLY.value:
             self.bridge.send(MessageType.BUILD_APPLY.value, env.payload)
+        elif env.type in (MessageType.SIM_STATE.value, MessageType.SIM_SELECTION_STATE.value,
+                          MessageType.INTERACTION_ACCEPTED.value, MessageType.INTERACTION_REJECTED.value,
+                          MessageType.INTERACTION_STARTED.value, MessageType.INTERACTION_FINISHED.value):
+            self.bridge.send(env.type, env.payload)
         elif env.type == MessageType.ERROR.value:
             self.bridge.send("sidecar.error", env.payload)
 

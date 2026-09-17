@@ -36,6 +36,41 @@ def test_disconnect_releases_sim_and_snapshot_persists_mapping():
     assert session.players['p2'].active_sim_id == '99'
 
 
+def test_roster_update_rederives_controllers_and_rejects_unowned_interaction():
+    session = HostSession()
+    session.add_player('host', 'Host')
+    session.add_player('p2', 'Player2')
+    session.update_sims([{'sim_id': '1', 'name': 'Alice'}, {'sim_id': '2', 'name': 'Bob', 'controllers': ['fake']}])
+    session.select_sim('host', '1')
+    session.select_sim('p2', '2')
+    assert session.sims['1']['controllers'] == ['host']
+    assert session.sims['2']['controllers'] == ['p2']
+    accepted = session.validate_interaction('owned', 'p2', {'sim_id': '2', 'affordance_id': 'go'})
+    assert accepted['status'] == 'accepted'
+    try:
+        session.validate_interaction('unowned', 'p2', {'sim_id': '1', 'affordance_id': 'go'})
+        assert False
+    except ValueError as exc:
+        assert str(exc) == 'sim_not_owned'
+
+
+def test_client_roster_is_forwarded_before_automatic_selection():
+    async def run():
+        client = KerMPClient('p2', 'Player2', '127.0.0.1', 0)
+        rt = ClientRuntime(client, bridge_port=0)
+        sent = []
+
+        async def fake_send(typ, payload=None):
+            sent.append((typ, payload or {}))
+
+        client.send = fake_send
+        await rt._on_game_event(BridgeEvent('sims.state', {
+            'sims': [{'sim_id': '2', 'name': 'Bob'}], 'active_sim_id': '2'}))
+        assert [item[0] for item in sent] == [MessageType.SIM_STATE, MessageType.SIM_SELECT]
+        assert sent[1][1]['sim_id'] == '2'
+    asyncio.run(run())
+
+
 def test_runtime_handshake_without_game_bridge_client():
     async def run():
         host = KerMPHost("h", "Host", "127.0.0.1", 0)

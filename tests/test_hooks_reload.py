@@ -328,3 +328,32 @@ def test_client_interaction_unresolvable_affordance_is_dropped():
         assert result is None
         assert not any(t == 'interaction.request' for t, _ in emitted)
         assert hooks.interaction_status()['dropped'] == 1
+
+
+def test_active_sim_is_published_once_after_roster_is_available():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        hooks._sidecar_role = 'client'
+        info = types.SimpleNamespace(id=77, full_name='Active Sim',
+                                     get_sim_instance=lambda allow_hidden_flags=True: object())
+        sandbox.services.get_first_client = lambda: types.SimpleNamespace(active_sim_info=info)
+        sandbox.services.sim_info_manager = lambda: types.SimpleNamespace(get_all=lambda: [info])
+        emitted = []
+        hooks.bridge.emit = lambda t, p: emitted.append((t, p)) or True
+        assert hooks._publish_active_sim_if_ready() is True
+        assert hooks._publish_active_sim_if_ready() is True
+        assert [t for t, _ in emitted] == ['sims.state', 'sim.select', 'sims.state']
+        assert emitted[1][1]['sim_id'] == '77'
+
+
+def test_active_sim_is_not_published_before_valid_roster_entry():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        hooks._sidecar_role = 'client'
+        sandbox.services.get_first_client = lambda: types.SimpleNamespace(
+            active_sim_info=types.SimpleNamespace(id=77))
+        sandbox.services.sim_info_manager = lambda: types.SimpleNamespace(get_all=lambda: [])
+        emitted = []
+        hooks.bridge.emit = lambda t, p: emitted.append((t, p)) or True
+        assert hooks._publish_active_sim_if_ready() is False
+        assert [t for t, _ in emitted] == ['sims.state']

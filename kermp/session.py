@@ -100,9 +100,10 @@ class HostSession:
 
     def update_sims(self, sims: list[dict]) -> None:
         previous = self.sims
+        # Controllers are derived only from authoritative Player state.
         self.sims = {str(s["sim_id"]): {"sim_id": str(s["sim_id"]), "name": str(s.get("name", "")),
-                                        "controllers": list(s.get("controllers") or previous.get(str(s["sim_id"]), {}).get("controllers", []))}
-                     for s in sims if s.get("sim_id") is not None}
+                                        "controllers": list(previous.get(str(s["sim_id"]), {}).get("controllers", []))}
+                     for s in sims if s.get("sim_id") is not None and str(s.get("sim_id"))}
         for sim_id in self.sims:
             self._set_sim_controllers(sim_id)
 

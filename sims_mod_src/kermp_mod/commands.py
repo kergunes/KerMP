@@ -83,12 +83,14 @@ def kermp_play_status(_connection=None):
     out('CAPTURE installed=%s observed=%s replicated=%s dropped_local=%s error=%s' %
         (getattr(hooks, '_game_message_capture_installed', False), cap.get('observed'),
          cap.get('replicated'), cap.get('dropped_local'), (cap.get('last_error') or 'none').splitlines()[0] if cap.get('last_error') else 'none'))
-    out('INTERACTION forwarded=%s last_affordance=%s last_target=%s last_sim=%s error=%s' %
-        (inter.get('forwarded'), inter.get('last_affordance_id'), inter.get('last_target_id'),
-         inter.get('last_sim_id'), (inter.get('last_error') or 'none').splitlines()[0] if inter.get('last_error') else 'none'))
+    out('INTERACTION intercepted=%s sent=%s accepted=%s rejected=%s started=%s last_affordance=%s last_target=%s last_sim=%s error=%s' %
+        (inter.get('forwarded'), inter.get('sent'), inter.get('accepted'), inter.get('rejected'), inter.get('started'),
+         inter.get('last_affordance_id'), inter.get('last_target_id'), inter.get('last_sim_id'),
+         (inter.get('last_error') or 'none').splitlines()[0] if inter.get('last_error') else 'none'))
     out('RX view_updates_received=%s TX view_updates_sent=%s' %
         (getattr(hooks, '_view_updates_received', 0), getattr(hooks, '_view_updates_sent', 0)))
-    out('CONTROLLED_SIM=%s' % (hooks._active_sim_id() or 'none'))
+    out('LOCAL_ACTIVE_SIM=%s' % (hooks._active_sim_id() or 'none'))
+    out('AUTHORITATIVE_CONTROLLED_SIM=%s' % (hooks._authoritative_sim_id or 'none'))
     out('BUILD_MODE build_owner=%s capture_available=%s apply_available=%s' %
         (getattr(adapter, 'last_local_operation', None) and adapter.last_local_operation.get('op', 'none') or 'none',
          'capture' in adapter.capabilities(), 'apply' in adapter.capabilities()))
@@ -118,11 +120,11 @@ def kermp_distributor_status(_connection=None):
 @sims4.commands.Command('kermp.sims', command_type=sims4.commands.CommandType.Live)
 def kermp_sims(_connection=None):
     sims = enumerate_sims()
-    bridge.emit('sims.state', {'sims': sims})
+    bridge.emit('sims.state', {'sims': sims, 'active_sim_id': hooks._active_sim_id()})
     out = _out(_connection)
     for sim in sims:
         out('sim_id=%s name=%s controllers=%s' %
-            (sim['sim_id'], sim['name'], ','.join(sim.get('controllers') or []) or 'none'))
+            (sim['sim_id'], sim['name'], ','.join(hooks._authoritative_controllers.get(sim['sim_id'], [])) or 'none'))
     if not sims:
         out('no loaded Sims found')
 

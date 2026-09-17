@@ -224,6 +224,10 @@ class KerMPHost:
                 return
             await self.broadcast(MessageType.SIM_SELECTION_STATE, state, include_host=True)
             return
+        if env.type == MessageType.SIM_STATE.value:
+            self.session.update_sims(list(env.payload.get("sims") or []))
+            await self.broadcast(MessageType.SIM_STATE, self.session.snapshot(), include_host=True)
+            return
         if env.type == MessageType.INTERACTION_REQUEST.value:
             try:
                 request = self.session.validate_interaction(env.payload.get("request_id"), env.sender_id, env.payload)

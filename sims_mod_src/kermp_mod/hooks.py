@@ -21,6 +21,7 @@ _last_wall_event = None
 _wall_callback_info = {}
 _last_sims = []
 _sidecar_role = None
+_sidecar_player_id = None
 _travel_epoch = 0
 _travel_buffering = False
 _travel_buffer = []
@@ -55,8 +56,13 @@ _message_stats = {'observed': 0, 'replicated': 0, 'dropped_local': 0,
                   'last_error': None}
 _local_only_ids = None
 _interaction_interception_installed = False
+_active_sim_hook_installed = False
+_last_published_active_sim_id = None
+_authoritative_sim_id = None
+_authoritative_controllers = {}
 _interaction_stats = {'forwarded': 0, 'dropped': 0, 'last_affordance_id': None,
-                      'last_target_id': None, 'last_sim_id': None, 'last_error': None}
+                      'last_target_id': None, 'last_sim_id': None, 'last_error': None,
+                      'sent': 0, 'accepted': 0, 'rejected': 0, 'started': 0}
 
 
 def _record_patch(target, attr, original):
@@ -94,6 +100,12 @@ def install():
     bridge.on('sidecar.welcome', _sidecar_welcome)
     bridge.on('sim.enumerate', _sim_enumerate)
     bridge.on('sim.select', _sim_select)
+    bridge.on('sim.selection_state', _sim_selection_state)
+    bridge.on('sim.state', _sim_state)
+    bridge.on('interaction.accepted', _interaction_accepted)
+    bridge.on('interaction.rejected', _interaction_rejected)
+    bridge.on('interaction.started', _interaction_started)
+    bridge.on('interaction.finished', _interaction_finished)
     bridge.on('interaction.request', _interaction_request)
     bridge.on('game.raw_message', _raw_game_message)
     bridge.start()
@@ -104,6 +116,7 @@ def install():
     _install_game_message_capture()
     _install_travel_hook()
     _install_interaction_interception()
+    _install_active_sim_hooks()
     _log('KerMP installed')
 
 
@@ -114,7 +127,7 @@ def teardown():
     The caller should abort the reload on a non-empty result, because the
     runtime may otherwise be left in an unknown half-dismantled state.
     """
-    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed, _interaction_interception_installed
+    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed, _interaction_interception_installed, _active_sim_hook_installed, _last_published_active_sim_id
     errors = []
     # Stop accepting new bridge events first.
     try:
@@ -139,6 +152,8 @@ def teardown():
     _game_message_capture_installed = False
     _timeline_suppression_installed = False
     _interaction_interception_installed = False
+    _active_sim_hook_installed = False
+    _last_published_active_sim_id = None
     _installed = False
     return errors
 
@@ -182,9 +197,15 @@ def _teardown_wall_contour_callback():
 
 
 def _sidecar_welcome(payload):
-    global _sidecar_role
+    global _sidecar_role, _sidecar_player_id
     _sidecar_role = payload.get('role')
+    _sidecar_player_id = payload.get('player_id')
     _configure_simulation_authority(_sidecar_role)
+    _install_active_sim_hooks()
+    try:
+        _publish_active_sim_if_ready()
+    except Exception:
+        _log(traceback.format_exc())
     _log('Sidecar connected role=%s' % payload.get('role'))
 
 
@@ -441,12 +462,16 @@ def _install_interaction_interception():
                 _interaction_stats['last_affordance_id'] = affordance_id
                 _interaction_stats['last_target_id'] = target_id
                 _interaction_stats['last_sim_id'] = sim_id
-                bridge.emit('interaction.request', {
+                sent = bridge.emit('interaction.request', {
                     'request_id': 'local-%s' % __import__('uuid').uuid4().hex,
                     'affordance_id': str(affordance_id),
                     'target_id': str(target_id) if target_id is not None else '0',
                     'sim_id': str(sim_id) if sim_id is not None else '',
                 })
+                if sent:
+                    _interaction_stats['sent'] += 1
+                else:
+                    _interaction_stats['last_error'] = 'bridge_disconnected'
                 _log('KERMP INTERACTION FORWARDED affordance=%s target=%s sim=%s' %
                      (affordance_id, target_id, sim_id))
                 return None
@@ -725,6 +750,98 @@ def _sim_select(payload):
     # Selection is authoritative in the sidecar. This event is intentionally
     # diagnostic only; the host owns player -> Sim and the game owns execution.
     _log('KERMP SIM SELECT player=%s sim=%s' % (payload.get('player_id'), payload.get('sim_id')))
+
+
+def _sim_selection_state(payload):
+    global _authoritative_sim_id
+    payload = payload or {}
+    if payload.get('player_id') in ('local', _sidecar_role, _sidecar_player_id):
+        _authoritative_sim_id = payload.get('sim_id')
+    sim_id = str(payload.get('sim_id') or '')
+    if sim_id:
+        _authoritative_controllers[sim_id] = list(payload.get('controllers') or [])
+
+
+def _sim_state(payload):
+    global _authoritative_sim_id, _authoritative_controllers
+    payload = payload or {}
+    _authoritative_controllers = {}
+    for item in payload.get('sims') or []:
+        sim_id = str(item.get('sim_id'))
+        _authoritative_controllers[sim_id] = list(item.get('controllers') or [])
+    for player in payload.get('players') or []:
+        if player.get('player_id') in ('local', _sidecar_role, _sidecar_player_id):
+            _authoritative_sim_id = player.get('active_sim_id')
+            break
+
+
+def _interaction_accepted(_payload):
+    _interaction_stats['accepted'] += 1
+
+
+def _interaction_rejected(payload):
+    _interaction_stats['rejected'] += 1
+    _interaction_stats['last_error'] = str((payload or {}).get('reason') or 'rejected')
+
+
+def _interaction_started(_payload):
+    _interaction_stats['started'] += 1
+
+
+def _interaction_finished(_payload):
+    return None
+
+
+def _publish_active_sim_if_ready():
+    """Publish the local observation only after the live roster contains it."""
+    global _last_published_active_sim_id
+    if _sidecar_role not in ('host', 'client'):
+        return False
+    sims = enumerate_sims()
+    active_id = _active_sim_id()
+    bridge.emit('sims.state', {'sims': sims, 'active_sim_id': active_id})
+    if not active_id or active_id not in {item['sim_id'] for item in sims}:
+        return False
+    if active_id == _last_published_active_sim_id:
+        return True
+    _last_published_active_sim_id = active_id
+    return bridge.emit('sim.select', {'sim_id': active_id, 'local': True})
+
+
+def _install_active_sim_hooks():
+    global _active_sim_hook_installed
+    if _active_sim_hook_installed:
+        return True
+    try:
+        import services
+        client = services.get_first_client()
+        client_type = type(client) if client is not None else None
+        if client_type is None:
+            return False
+        installed = False
+        for name in ('set_active_sim_by_id', 'set_active_sim'):
+            original = getattr(client_type, name, None)
+            if not callable(original) or getattr(original, '_kermp_wrapped', False):
+                continue
+            def make_wrapper(method):
+                def wrapped(self, *args, **kwargs):
+                    result = method(self, *args, **kwargs)
+                    try:
+                        _publish_active_sim_if_ready()
+                    except Exception:
+                        _log(traceback.format_exc())
+                    return result
+                wrapped._kermp_wrapped = True
+                wrapped._kermp_original = method
+                return wrapped
+            setattr(client_type, name, make_wrapper(original))
+            _record_patch(client_type, name, original)
+            installed = True
+        _active_sim_hook_installed = installed
+        return installed
+    except Exception:
+        _log('KERMP active Sim hook unavailable: %s' % traceback.format_exc())
+        return False
 
 
 def _resolve_interaction(payload):
@@ -1684,6 +1801,7 @@ def _install_zone_hooks():
 def _after_zone_spin_up():
     global _pending_travel_txn, _travel_batch_complete, _travel_local_zone_loaded
     if not _pending_travel_txn:
+        _publish_active_sim_if_ready()
         return
     try:
         import services
@@ -1691,6 +1809,7 @@ def _after_zone_spin_up():
     except Exception:
         zone_id = 0
     _travel_local_zone_loaded = True
+    _publish_active_sim_if_ready()
     if _sidecar_role == 'client':
         # Local loading is necessary but not sufficient: wait for host END.
         if _travel_batch_complete:
