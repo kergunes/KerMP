@@ -63,6 +63,7 @@ def kermp_play_status(_connection=None):
     role = hooks._sidecar_role or 'unknown'
     sim = hooks.simulation_status()
     clock = hooks.clock_status()
+    aop = hooks.aop_status()
     cap = hooks.message_capture_status()
     inter = hooks.interaction_status()
     zone_id = 0
@@ -83,6 +84,11 @@ def kermp_play_status(_connection=None):
     out('CLOCK hooks_installed=%s source=%s requests=%s applied=%s error=%s' %
         (clock.get('installed'), sim.get('clock_source'), clock.get('requests'),
          clock.get('applied'), clock.get('last_error') or 'none'))
+    out('INPUT_ENTRYPOINT=%s AOP_seen=%s AOP_user_seen=%s AOP_forwarded=%s source=%s affordance=%s target=%s sim=%s error=%s' %
+        (aop.get('last_entrypoint') or 'none', aop.get('seen'), aop.get('user_seen'),
+         aop.get('forwarded'), aop.get('last_source') or 'none',
+         aop.get('last_affordance') or 'none', aop.get('last_target') or 'none',
+         aop.get('last_sim') or 'none', aop.get('last_error') or 'none'))
     out('OMEGA send_available=%s' % omega_send)
     out('CAPTURE installed=%s observed=%s replicated=%s dropped_local=%s dropped_local_ops=%s error=%s' %
         (getattr(hooks, '_game_message_capture_installed', False), cap.get('observed'),

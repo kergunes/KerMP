@@ -67,6 +67,10 @@ _cancel_interception_installed = False
 _clock_hooks_installed = False
 _clock_apply_bypass = False
 _clock_status = {'installed': False, 'requests': 0, 'applied': 0, 'last_error': None}
+_aop_interception_installed = False
+_aop_stats = {'seen': 0, 'user_seen': 0, 'forwarded': 0, 'last_entrypoint': None,
+              'last_source': None, 'last_affordance': None, 'last_target': None,
+              'last_sim': None, 'last_error': None}
 _interaction_stats = {'forwarded': 0, 'dropped': 0, 'last_affordance_id': None,
                       'last_target_id': None, 'last_sim_id': None, 'last_error': None,
                       'sent': 0, 'accepted': 0, 'rejected': 0, 'started': 0,
@@ -140,7 +144,7 @@ def teardown():
     The caller should abort the reload on a non-empty result, because the
     runtime may otherwise be left in an unknown half-dismantled state.
     """
-    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed, _interaction_interception_installed, _active_sim_hook_installed, _last_published_active_sim_id, _cancel_interception_installed, _clock_hooks_installed, _clock_apply_bypass
+    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed, _interaction_interception_installed, _active_sim_hook_installed, _last_published_active_sim_id, _cancel_interception_installed, _clock_hooks_installed, _clock_apply_bypass, _aop_interception_installed
     errors = []
     # Stop accepting new bridge events first.
     try:
@@ -169,6 +173,7 @@ def teardown():
     _cancel_interception_installed = False
     _clock_hooks_installed = False
     _clock_apply_bypass = False
+    _aop_interception_installed = False
     _last_published_active_sim_id = None
     _installed = False
     return errors
@@ -219,6 +224,7 @@ def _sidecar_welcome(payload):
     _configure_simulation_authority(_sidecar_role)
     _install_active_sim_hooks()
     _install_clock_hooks()
+    _install_aop_interception()
     try:
         _publish_active_sim_if_ready()
     except Exception:
@@ -336,6 +342,122 @@ def _install_clock_hooks():
 
 def clock_status():
     return dict(_clock_status)
+
+
+def aop_status():
+    return dict(_aop_stats)
+
+
+def _interaction_source_name(context):
+    source = getattr(context, 'source', None) if context is not None else None
+    name = str(getattr(source, 'name', source)).upper() if source is not None else 'UNKNOWN'
+    return name.rsplit('.', 1)[-1]
+
+
+def _is_player_interaction_context(context):
+    source = _interaction_source_name(context)
+    # These names are from the installed Sims build's InteractionSource surface.
+    # AOP testing is also used by autonomy, so unknown/internal sources fail closed.
+    return source in ('SOURCE_PIE_MENU', 'PIE_MENU', 'SOURCE_SCRIPT_WITH_USER_INTENT',
+                      'SCRIPT_WITH_USER_INTENT')
+
+
+def _client_enqueue_result():
+    try:
+        from interactions.aop import EnqueueResult
+        return EnqueueResult(True, None)
+    except Exception:
+        # The UI caller must not be allowed to execute the AOP locally. Returning
+        # None is the safe fallback on builds without a constructible result type.
+        return None
+
+
+def _aop_request(aop, context, kwargs):
+    target = getattr(aop, 'target', None)
+    affordance = getattr(aop, 'affordance', None)
+    sim = getattr(context, 'sim', None) if context is not None else None
+    sim_id = _coerce_id(getattr(sim, 'sim_info', None)) or _coerce_id(sim)
+    target_id = _coerce_id(target)
+    affordance_id = _coerce_id(affordance)
+    if affordance_id is None or sim_id is None:
+        raise ValueError('aop_ids_unresolved')
+    position = None
+    if target_id is None:
+        candidate = _serialize_transform(target)
+        if isinstance(candidate, dict) and candidate.get('translation') is not None:
+            position = candidate
+    pick = getattr(context, 'pick', None) if context is not None else None
+    if position is None:
+        candidate = _serialize_transform(pick)
+        if isinstance(candidate, dict) and candidate.get('translation') is not None:
+            position = candidate
+    safe_kwargs = {}
+    for key, value in dict(getattr(aop, '_kwargs', {}) or {}).items():
+        safe = _json_value(value)
+        if isinstance(safe, (dict, list, str, int, float, bool)) or safe is None:
+            safe_kwargs[key] = safe
+    for key, value in dict(kwargs or {}).items():
+        safe = _json_value(value)
+        if isinstance(safe, (dict, list, str, int, float, bool)) or safe is None:
+            safe_kwargs[key] = safe
+    request_id = 'local-%s' % __import__('uuid').uuid4().hex
+    _interaction_request_by_id[request_id] = {'sim_id': str(sim_id)}
+    sent = bridge.emit('interaction.request', {
+        'request_id': request_id, 'sim_id': str(sim_id),
+        'affordance_id': str(affordance_id),
+        'target_id': str(target_id) if target_id is not None else '0',
+        'position': position, 'interaction_kwargs': safe_kwargs,
+    })
+    if not sent:
+        raise ValueError('bridge_disconnected')
+    _interaction_stats['forwarded'] += 1
+    _interaction_stats['sent'] += 1
+    _aop_stats['last_affordance'] = affordance_id
+    _aop_stats['last_target'] = target_id
+    _aop_stats['last_sim'] = sim_id
+    _interaction_stats['last_affordance_id'] = affordance_id
+    _interaction_stats['last_target_id'] = target_id
+    _interaction_stats['last_sim_id'] = sim_id
+    return _client_enqueue_result()
+
+
+def _install_aop_interception():
+    global _aop_interception_installed
+    if _aop_interception_installed:
+        return True
+    try:
+        from interactions.aop import AffordanceObjectPair
+        original = getattr(AffordanceObjectPair, 'test_and_execute', None)
+        if not callable(original):
+            _aop_stats['last_error'] = 'aop_test_and_execute_missing'
+            return False
+        if getattr(original, '_kermp_wrapped', False):
+            _aop_interception_installed = True
+            return True
+        def wrapped(self, context, *args, **kwargs):
+            _aop_stats['seen'] += 1
+            _aop_stats['last_entrypoint'] = 'AffordanceObjectPair.test_and_execute'
+            _aop_stats['last_source'] = _interaction_source_name(context)
+            if _sidecar_role != 'client' or not _is_player_interaction_context(context):
+                return original(self, context, *args, **kwargs)
+            _aop_stats['user_seen'] += 1
+            try:
+                result = _aop_request(self, context, kwargs)
+                return result
+            except Exception as exc:
+                _aop_stats['last_error'] = '%s: %s' % (type(exc).__name__, exc)
+                _interaction_stats['last_error'] = _aop_stats['last_error']
+                _log('KERMP AOP CAPTURE ERROR source=%s error=%s' % (_aop_stats['last_source'], exc))
+                return None
+        wrapped._kermp_wrapped = True
+        wrapped._kermp_original = original
+        AffordanceObjectPair.test_and_execute = wrapped
+        _record_patch(AffordanceObjectPair, 'test_and_execute', original)
+        _aop_interception_installed = True
+        return True
+    except Exception as exc:
+        _aop_stats['last_error'] = '%s: %s' % (type(exc).__name__, exc)
+        return False
 
 
 def _configure_simulation_authority(role):

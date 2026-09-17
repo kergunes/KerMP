@@ -118,6 +118,32 @@ class HooksSandbox:
                 return 'result'
         sim_mod.Sim = Sim
 
+        interactions = types.ModuleType('interactions')
+        interactions.__path__ = []
+        self._register('interactions', interactions)
+        aop_mod = types.ModuleType('interactions.aop')
+        self.aop_mod = aop_mod
+        self._register('interactions.aop', aop_mod)
+        interactions.aop = aop_mod
+
+        class EnqueueResult:
+            def __init__(self, test_result, execute_result):
+                self.test_result = test_result
+                self.execute_result = execute_result
+
+        class AffordanceObjectPair:
+            def __init__(self, affordance, target=None, kwargs=None):
+                self.affordance = affordance
+                self.target = target
+                self._kwargs = kwargs or {}
+
+            def test_and_execute(self, context, **kwargs):
+                sandbox.calls.append(('aop_original',))
+                return 'original'
+
+        aop_mod.EnqueueResult = EnqueueResult
+        aop_mod.AffordanceObjectPair = AffordanceObjectPair
+
         spec = importlib.util.spec_from_file_location('kermp_mod.hooks', _KERMP_MOD / 'hooks.py')
         hooks = importlib.util.module_from_spec(spec)
         self._register('kermp_mod.hooks', hooks)
@@ -319,6 +345,29 @@ def test_client_position_interaction_carries_pick_location():
         request = next(p for t, p in emitted if t == 'interaction.request')
         assert request['target_id'] == '0'
         assert request['position']['translation'] == [1.0, 2.0, 3.0]
+
+
+def test_client_aop_player_entrypoint_is_captured_without_local_execute():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        hooks._sidecar_role = 'client'
+        assert hooks._install_aop_interception() is True
+        emitted = []
+        hooks.bridge.emit = lambda t, p: emitted.append((t, p)) or True
+        sim = sandbox.sim_mod.Sim()
+        context = types.SimpleNamespace(
+            source=types.SimpleNamespace(name='SOURCE_PIE_MENU'), sim=sim,
+            pick=types.SimpleNamespace(position=types.SimpleNamespace(x=4, y=5, z=6)))
+        aop = sandbox.aop_mod.AffordanceObjectPair(types.SimpleNamespace(guid64=321), None,
+                                                    {'picked_item_ids': [9]})
+        result = aop.test_and_execute(context)
+        assert result.test_result is True
+        assert sandbox.calls == []
+        request = next(p for t, p in emitted if t == 'interaction.request')
+        assert request['affordance_id'] == '321'
+        assert request['sim_id'] == '77'
+        assert request['position']['translation'] == [4.0, 5.0, 6.0]
+        assert hooks.aop_status()['user_seen'] == 1
 
 
 def test_host_interaction_executes_locally():
