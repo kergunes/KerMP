@@ -1,8 +1,8 @@
 """Source-only Sims-side bridge prototype.
 
-The bridge is process-stable during KerMP hot reloads.  Its dispatch gate keeps
-network messages away from a module while that module namespace is being
-re-executed.
+The bridge is process-stable during KerMP hot reloads. Its dispatch gate can
+quiesce an in-flight handler, queue new network messages, and then drain them in
+order against the new handler generation.
 """
 
 import json
@@ -20,13 +20,17 @@ class KerMPBridgeClient(object):
         self._stop = False
         self.handlers = {}
         self._lock = threading.RLock()
+        self._dispatch_condition = threading.Condition(self._lock)
         self._send_lock = threading.Lock()
         self._thread = None
         self._start_count = 0
         self._dispatch_paused = False
+        self._active_dispatches = 0
         self._queued_messages = []
         self._max_queued_messages = 256
         self._dropped_messages = 0
+        self._dispatch_error_count = 0
+        self._last_dispatch_error = None
 
     def connect(self):
         while not self._stop:
@@ -90,17 +94,53 @@ class KerMPBridgeClient(object):
     def emit(self, event_type, payload):
         return self._send(event_type, payload)
 
-    def pause_dispatch(self):
-        with self._lock:
+    def pause_dispatch(self, timeout=5.0):
+        """Pause new dispatches and wait until every old handler has returned."""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._dispatch_condition:
             self._dispatch_paused = True
+            while self._active_dispatches:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._dispatch_condition.wait(remaining)
+            return True
+
+    def _run_handler(self, handler, payload):
+        try:
+            handler(payload)
+            return None
+        except Exception as exc:
+            with self._lock:
+                self._dispatch_error_count += 1
+                self._last_dispatch_error = '%s: %s' % (type(exc).__name__, exc)
+            return exc
+        finally:
+            with self._dispatch_condition:
+                self._active_dispatches -= 1
+                self._dispatch_condition.notify_all()
 
     def resume_dispatch(self):
-        with self._lock:
-            self._dispatch_paused = False
-            queued = list(self._queued_messages)
-            self._queued_messages = []
-        for msg in queued:
-            self._dispatch_message(msg)
+        """Drain queued messages FIFO while the gate remains closed.
+
+        New arrivals continue to queue until the backlog is empty, preventing a
+        newer packet from overtaking one captured during reload.
+        """
+        errors = 0
+        while True:
+            with self._dispatch_condition:
+                if not self._queued_messages:
+                    self._dispatch_paused = False
+                    self._dispatch_condition.notify_all()
+                    return errors
+                msg = self._queued_messages.pop(0)
+                handler = self.handlers.get(msg.get("type"))
+                if not handler:
+                    continue
+                self._active_dispatches += 1
+            error = self._run_handler(handler, msg.get("payload", {}))
+            if error is not None:
+                errors += 1
 
     def _send(self, event_type, payload):
         with self._lock:
@@ -116,7 +156,7 @@ class KerMPBridgeClient(object):
             return False
 
     def _dispatch_message(self, msg):
-        with self._lock:
+        with self._dispatch_condition:
             if self._dispatch_paused:
                 if len(self._queued_messages) >= self._max_queued_messages:
                     self._queued_messages.pop(0)
@@ -124,8 +164,10 @@ class KerMPBridgeClient(object):
                 self._queued_messages.append(msg)
                 return
             handler = self.handlers.get(msg.get("type"))
-        if handler:
-            handler(msg.get("payload", {}))
+            if not handler:
+                return
+            self._active_dispatches += 1
+        self._run_handler(handler, msg.get("payload", {}))
 
     def _read_loop(self, current):
         handle = current.makefile("rb")
@@ -148,8 +190,11 @@ class KerMPBridgeClient(object):
                 "thread_alive": bool(self._thread is not None and self._thread.is_alive()),
                 "start_count": self._start_count,
                 "dispatch_paused": self._dispatch_paused,
+                "active_dispatches": self._active_dispatches,
                 "queued_messages": len(self._queued_messages),
                 "dropped_messages": self._dropped_messages,
+                "dispatch_error_count": self._dispatch_error_count,
+                "last_dispatch_error": self._last_dispatch_error,
                 "connected": bool(self.sock),
                 "handler_count": len(self.handlers),
             }
