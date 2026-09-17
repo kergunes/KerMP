@@ -83,9 +83,11 @@ _command_proxy_installed = False
 _command_registry_patches = []
 _remote_clients = {}
 _remote_accounts = {}
+_headless_remote_client_ids = set()
 _command_stats = {'installed': False, 'captured': 0, 'forwarded': 0, 'fallback': 0,
                   'replayed': 0, 'rejected': 0, 'remote_clients': 0,
                   'last_command': None, 'last_player_id': None, 'last_remote_client_id': None,
+                  'remote_client_stage': None, 'remote_client_registration': 'unknown',
                   'last_error': None}
 
 
@@ -163,16 +165,19 @@ def teardown():
         bridge.stop()
     except Exception as exc:
         errors.append('bridge stop: %s' % exc)
+    # Headless Client removal must run before restoring the narrow Client
+    # lifecycle wrappers below; vanilla Client.on_remove would clear the one
+    # stock Distributor client.
+    try:
+        _teardown_command_proxy()
+    except Exception as exc:
+        errors.append('command proxy: %s' % exc)
     for target, attr, original in _patches:
         try:
             setattr(target, attr, original)
         except Exception as exc:
             errors.append('restore %s.%s: %s' % (type(target).__name__, attr, exc))
     del _patches[:]
-    try:
-        _teardown_command_proxy()
-    except Exception as exc:
-        errors.append('command proxy: %s' % exc)
     try:
         _teardown_wall_contour_callback()
     except Exception as exc:
@@ -611,6 +616,7 @@ def _capture_native_push(command_name, original, affordance, opt_target, opt_sim
             return original(affordance, opt_target, opt_sim, priority, interaction_context, connection)
         _interaction_request_by_id[request_id] = {'sim_id': str(sim_id), 'command': command_name}
         _command_stats['forwarded'] += 1
+        _command_stats['last_error'] = None
         return _client_enqueue_result()
     except Exception as exc:
         _command_stats['last_error'] = '%s: %s' % (type(exc).__name__, exc)
@@ -632,6 +638,7 @@ def _capture_native_cancel(command_name, original, args, connection):
         return original(*args, connection)
     _interaction_request_by_id[request_id] = {'sim_id': str(sim_id), 'command': command_name}
     _command_stats['forwarded'] += 1
+    _command_stats['last_error'] = None
     return None
 
 
@@ -645,7 +652,8 @@ def _wire_pick_type(value):
         return _command_value(value, 0)
 
 
-def _capture_native_choice(command_name, original, values, connection, delegate_locally):
+def _capture_native_choice(command_name, original, wire_values, connection, delegate_locally,
+                           native_values=None):
     """Mirror pie-menu lifecycle calls so host owns the eventual selection.
 
     ``has_choices`` and ``choices`` must run first on the host virtual Client:
@@ -662,7 +670,7 @@ def _capture_native_choice(command_name, original, values, connection, delegate_
         sim_id = _coerce_id(getattr(sim, 'sim_info', None)) or _coerce_id(sim)
         if sim_id is None:
             raise ValueError('active_sim_unresolved')
-        command = {'name': command_name, 'affordance_id': 'native.choice', 'args': list(values)}
+        command = {'name': command_name, 'affordance_id': 'native.choice', 'args': list(wire_values)}
         request_id = 'command-%s' % __import__('uuid').uuid4().hex
         sent = bridge.emit('interaction.command', {'request_id': request_id, 'sim_id': str(sim_id),
                                                    'command': command})
@@ -670,7 +678,9 @@ def _capture_native_choice(command_name, original, values, connection, delegate_
             raise ValueError('bridge_disconnected')
         _interaction_request_by_id[request_id] = {'sim_id': str(sim_id), 'command': command_name}
         _command_stats['forwarded'] += 1
-        return original(*values, connection) if delegate_locally else None
+        _command_stats['last_error'] = None
+        local_values = native_values if native_values is not None else wire_values
+        return original(*local_values, connection) if delegate_locally else None
     except Exception as exc:
         _command_stats['last_error'] = '%s: %s' % (type(exc).__name__, exc)
         _command_stats['fallback'] += 1
@@ -738,12 +748,14 @@ def _install_native_command_proxy():
 
         def has_choices(target_id, pick_type, x=0.0, y=0.0, z=0.0, lot_id=0, level=0,
                         control=0, alt=0, shift=0, reference_id=0, is_routable=True, _connection=None):
-            values = [int(target_id), _wire_pick_type(pick_type), float(x), float(y), float(z), int(lot_id),
-                      int(level), int(control), int(alt), int(shift), int(reference_id), bool(is_routable)]
+            native_values = [int(target_id), pick_type, float(x), float(y), float(z), int(lot_id),
+                             int(level), int(control), int(alt), int(shift), int(reference_id), bool(is_routable)]
+            wire_values = list(native_values)
+            wire_values[1] = _wire_pick_type(pick_type)
             if _sidecar_role != 'client':
-                return interaction_commands.has_choices(*values, _connection)
+                return interaction_commands.has_choices(*native_values, _connection)
             return _capture_native_choice('interactions.has_choices', interaction_commands.has_choices,
-                                          values, _connection, True)
+                                          wire_values, _connection, True, native_values)
         has_choices.__annotations__ = {'target_id': int, 'pick_type': interaction_commands.PickType,
                                        'x': float, 'y': float, 'z': float, 'lot_id': int, 'level': int,
                                        'control': int, 'alt': int, 'shift': int, 'reference_id': int,
@@ -752,13 +764,15 @@ def _install_native_command_proxy():
         def choices(target_id, pick_type, x=0.0, y=0.0, z=0.0, lot_id=0, level=0, control=0,
                     alt=0, shift=0, reference_id=0, referred_object_id=0, preferred_object_id=0,
                     is_routable=True, _connection=None):
-            values = [int(target_id), _wire_pick_type(pick_type), float(x), float(y), float(z), int(lot_id),
-                      int(level), int(control), int(alt), int(shift), int(reference_id), int(referred_object_id),
-                      int(preferred_object_id), bool(is_routable)]
+            native_values = [int(target_id), pick_type, float(x), float(y), float(z), int(lot_id),
+                             int(level), int(control), int(alt), int(shift), int(reference_id), int(referred_object_id),
+                             int(preferred_object_id), bool(is_routable)]
+            wire_values = list(native_values)
+            wire_values[1] = _wire_pick_type(pick_type)
             if _sidecar_role != 'client':
-                return interaction_commands.generate_choices(*values, _connection)
+                return interaction_commands.generate_choices(*native_values, _connection)
             return _capture_native_choice('interactions.choices', interaction_commands.generate_choices,
-                                          values, _connection, True)
+                                          wire_values, _connection, True, native_values)
         choices.__annotations__ = {'target_id': int, 'pick_type': interaction_commands.PickType,
                                    'x': float, 'y': float, 'z': float, 'lot_id': int, 'level': int,
                                    'control': int, 'alt': int, 'shift': int, 'reference_id': int,
@@ -820,10 +834,12 @@ def _teardown_command_proxy():
             remove = getattr(services.client_manager(), 'remove', None)
             if callable(remove):
                 remove(client)
+            _headless_remote_client_ids.discard(getattr(client, 'id', None))
         except Exception as exc:
             errors.append('remote_client:%s:%s' % (player_id, exc))
     _remote_clients.clear()
     _remote_accounts.clear()
+    _headless_remote_client_ids.clear()
     _command_stats['remote_clients'] = 0
     _command_stats['installed'] = False
     _command_proxy_installed = False
@@ -848,10 +864,80 @@ def _forward_remote_client_message(remote_client_id, msg_id, msg):
         if not sent:
             raise ValueError('bridge_disconnected')
         _command_stats['last_remote_client_id'] = str(remote_client_id)
+        _command_stats['last_error'] = None
         return None
     except Exception as exc:
         _command_stats['last_error'] = 'remote_send:%s:%s' % (type(exc).__name__, exc)
         return None
+
+
+def _install_headless_remote_client_lifecycle():
+    """Keep a KerMP Client in ClientManager but outside stock Distributor UI.
+
+    Current ``Distributor.add_client`` deliberately supports only one native UI
+    Client.  ClientManager/EA command lookup, ChoiceMenu state and active-Sim
+    state are independent of that registration, so a tagged KerMP Client runs
+    the non-UI portions of Client.on_add/on_remove while the real host Client
+    continues through the untouched vanilla methods.
+    """
+    try:
+        from server.client import Client
+        original_add = getattr(Client, 'on_add')
+        original_remove = getattr(Client, 'on_remove')
+        if getattr(original_add, '_kermp_headless_lifecycle', False):
+            return True
+
+        def on_add(client):
+            if getattr(client, 'id', None) not in _headless_remote_client_ids:
+                return original_add(client)
+            _command_stats['remote_client_stage'] = 'on_add_headless'
+            account = getattr(client, '_account', None)
+            if account is not None:
+                account.register_client(client)
+            for sim_info in getattr(client, '_selectable_sims', ()):
+                client.on_sim_added_to_skewer(sim_info)
+            selectable = getattr(client, 'selectable_sims', None)
+            add_watcher = getattr(selectable, 'add_watcher', None)
+            if callable(add_watcher):
+                add_watcher(client, client.send_selectable_sims_update)
+            _command_stats['remote_client_registration'] = 'headless_client_manager_only'
+            _command_stats['remote_client_stage'] = 'on_add_headless_complete'
+            return None
+
+        def on_remove(client):
+            if getattr(client, 'id', None) not in _headless_remote_client_ids:
+                return original_remove(client)
+            _command_stats['remote_client_stage'] = 'on_remove_headless'
+            setter = getattr(client, '_set_active_sim_without_field_distribution', None)
+            if callable(setter) and getattr(client, 'active_sim', None) is not None:
+                setter(None)
+            account = getattr(client, '_account', None)
+            if account is not None:
+                account.unregister_client(client)
+            for sim_info in getattr(client, '_selectable_sims', ()):
+                client.on_sim_removed_from_skewer(sim_info)
+            selectable = getattr(client, 'selectable_sims', None)
+            remove_watcher = getattr(selectable, 'remove_watcher', None)
+            if callable(remove_watcher):
+                remove_watcher(client)
+            client._selectable_sims = None
+            client.active = False
+            _command_stats['remote_client_stage'] = 'on_remove_headless_complete'
+            return None
+
+        on_add._kermp_headless_lifecycle = True
+        on_add._kermp_original = original_add
+        on_remove._kermp_headless_lifecycle = True
+        on_remove._kermp_original = original_remove
+        Client.on_add = on_add
+        Client.on_remove = on_remove
+        _record_patch(Client, 'on_add', original_add)
+        _record_patch(Client, 'on_remove', original_remove)
+        return True
+    except Exception as exc:
+        _command_stats['remote_client_stage'] = 'lifecycle_install_failed'
+        _command_stats['last_error'] = 'headless_lifecycle:%s:%s' % (type(exc).__name__, exc)
+        return False
 
 
 def _remote_client_for(player_id, sim):
@@ -861,6 +947,9 @@ def _remote_client_for(player_id, sim):
         manager = services.client_manager()
         client = _remote_clients.get(str(player_id))
         if client is None:
+            _command_stats['remote_client_stage'] = 'create'
+            if not _install_headless_remote_client_lifecycle():
+                raise ValueError(_command_stats['last_error'] or 'headless_lifecycle_unavailable')
             from server.account import Account
             client_id = _remote_numeric_id(player_id, 'client')
             while manager.get(client_id) is not None:
@@ -880,19 +969,26 @@ def _remote_client_for(player_id, sim):
                 return original_send(candidate, msg_id, msg)
             Client.send_message = bootstrap_send
             try:
+                _headless_remote_client_ids.add(client_id)
+                _command_stats['remote_client_stage'] = 'client_manager_add'
                 client = manager.create_client(client_id, account, household_id)
+            except Exception:
+                _headless_remote_client_ids.discard(client_id)
+                raise
             finally:
                 Client.send_message = original_send
             client.send_message = lambda msg_id, msg: _forward_remote_client_message(client_id, msg_id, msg)
             _remote_clients[str(player_id)] = client
             _remote_accounts[str(player_id)] = account
             _command_stats['remote_clients'] = len(_remote_clients)
+            _command_stats['remote_client_stage'] = 'created_headless'
         info = getattr(sim, 'sim_info', None)
         setter = getattr(client, '_set_active_sim_without_field_distribution', None)
         if callable(setter) and info is not None:
             setter(info)
         elif info is not None:
             client.active_sim_info = info
+        _command_stats['last_error'] = None
         return client
     except Exception as exc:
         raise ValueError('remote_client:%s:%s' % (type(exc).__name__, exc))
@@ -1003,6 +1099,7 @@ def _interaction_command(payload):
         if not result:
             raise ValueError('native_command_rejected')
         _command_stats['replayed'] += 1
+        _command_stats['last_error'] = None
         bridge.emit('interaction.started', {'request_id': request_id, 'sim_id': str(sim_id),
                                             'interaction_id': str(getattr(result, 'id', '')),
                                             'command': name})

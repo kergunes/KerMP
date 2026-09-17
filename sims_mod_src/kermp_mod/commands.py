@@ -103,9 +103,10 @@ def kermp_play_status(_connection=None):
          inter.get('apply_accepted'), inter.get('apply_rejected'), inter.get('rejected'), inter.get('started'),
          inter.get('last_affordance_id'), inter.get('last_target_id'), inter.get('last_sim_id'),
          (inter.get('last_error') or 'none').splitlines()[0] if inter.get('last_error') else 'none'))
-    out('NATIVE_COMMAND installed=%s captured=%s forwarded=%s fallback=%s replayed=%s rejected=%s remote_clients=%s last_command=%s last_player=%s remote_client_id=%s error=%s' %
+    out('NATIVE_COMMAND installed=%s captured=%s forwarded=%s fallback=%s replayed=%s rejected=%s remote_clients=%s remote_stage=%s remote_registration=%s last_command=%s last_player=%s remote_client_id=%s error=%s' %
         (command.get('installed'), command.get('captured'), command.get('forwarded'), command.get('fallback'),
          command.get('replayed'), command.get('rejected'), command.get('remote_clients'),
+         command.get('remote_client_stage') or 'none', command.get('remote_client_registration') or 'unknown',
          command.get('last_command') or 'none', command.get('last_player_id') or 'none',
          command.get('last_remote_client_id') or 'none',
          (command.get('last_error') or 'none').splitlines()[0] if command.get('last_error') else 'none'))

@@ -530,6 +530,89 @@ def test_native_choice_capture_preserves_pick_arguments_for_host_replay():
         assert emitted[0][1]['sim_id'] == '77'
 
 
+def test_native_choice_capture_uses_native_pick_type_for_local_ea_call():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        hooks._sidecar_role = 'client'
+        sim = sandbox.sim_mod.Sim()
+        native_pick_type = object()
+        sandbox.services.client_manager = lambda: types.SimpleNamespace(
+            get=lambda connection: types.SimpleNamespace(active_sim=sim))
+        hooks.bridge.emit = lambda name, payload: True
+        local_calls = []
+
+        hooks._capture_native_choice('interactions.has_choices',
+                                     lambda *args: local_calls.append(args) or 'local',
+                                     [0, 'PICK_TERRAIN'], 7, True,
+                                     [0, native_pick_type])
+        assert local_calls[0][1] is native_pick_type
+        assert local_calls[0][-1] == 7
+
+
+def test_headless_remote_client_skips_stock_distributor_registration_and_tears_down():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        calls = []
+
+        class Selectable:
+            def add_watcher(self, client, callback): calls.append(('watch_add', client.id))
+            def remove_watcher(self, client): calls.append(('watch_remove', client.id))
+
+        class FakeClient:
+            def __init__(self, client_id, account, household_id):
+                self.id, self._account, self._household_id = client_id, account, household_id
+                self._selectable_sims = []
+                self.selectable_sims = Selectable()
+                self.active_sim = None
+                self.active = True
+            def on_add(self): calls.append(('vanilla_add', self.id))
+            def on_remove(self): calls.append(('vanilla_remove', self.id))
+            def on_sim_added_to_skewer(self, sim_info): calls.append(('sim_add', self.id))
+            def on_sim_removed_from_skewer(self, sim_info): calls.append(('sim_remove', self.id))
+            def send_selectable_sims_update(self): calls.append(('selectable_update', self.id))
+            def send_message(self, msg_id, msg): calls.append(('omega_send', self.id, msg_id))
+            def _set_active_sim_without_field_distribution(self, info): self.active_sim = info
+
+        sandbox.server_client.Client = FakeClient
+        account_mod = types.ModuleType('server.account')
+        sandbox._register('server.account', account_mod)
+
+        class Account:
+            def __init__(self, account_id, persona_name): self.id = account_id
+            def register_client(self, client): calls.append(('account_add', client.id))
+            def unregister_client(self, client): calls.append(('account_remove', client.id))
+        account_mod.Account = Account
+
+        class Manager:
+            def __init__(self): self.objects = {}
+            def get(self, client_id): return self.objects.get(client_id)
+            def create_client(self, client_id, account, household_id):
+                client = FakeClient(client_id, account, household_id)
+                self.objects[client_id] = client
+                client.on_add()
+                return client
+            def remove(self, client):
+                client.on_remove()
+                self.objects.pop(client.id, None)
+        manager = Manager()
+        sandbox.services.client_manager = lambda: manager
+        remote_sim = types.SimpleNamespace(sim_info=types.SimpleNamespace(id=77, household_id=10))
+        host_client = FakeClient(1, Account(1, 'host'), 10)
+        host_client.on_add()
+
+        remote = hooks._remote_client_for('p2', remote_sim)
+        assert remote.id in manager.objects
+        assert remote.active_sim is remote_sim.sim_info
+        assert ('vanilla_add', remote.id) not in calls
+        assert ('vanilla_add', 1) in calls
+        assert not any(item[0] == 'omega_send' and item[1] == remote.id for item in calls)
+
+        hooks._teardown_command_proxy()
+        assert remote.id not in manager.objects
+        assert ('vanilla_remove', remote.id) not in calls
+        assert ('account_remove', remote.id) in calls
+
+
 def test_active_sim_is_published_once_after_roster_is_available():
     with HooksSandbox() as sandbox:
         hooks = sandbox.hooks
