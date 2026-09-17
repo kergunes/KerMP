@@ -49,6 +49,14 @@ _simulation_status = {'role': 'unknown', 'timeline_suppression_available': False
 _simulation_bypass = False
 _timeline_suppression_installed = False
 _patches = []
+_message_stats = {'observed': 0, 'replicated': 0, 'dropped_local': 0,
+                  'dropped_oversize': 0, 'dropped_unserializable': 0,
+                  'dropped_unknown': 0, 'by_id': {}, 'last_msg_id': None,
+                  'last_error': None}
+_local_only_ids = None
+_interaction_interception_installed = False
+_interaction_stats = {'forwarded': 0, 'dropped': 0, 'last_affordance_id': None,
+                      'last_target_id': None, 'last_sim_id': None, 'last_error': None}
 
 
 def _record_patch(target, attr, original):
@@ -95,6 +103,7 @@ def install():
     _install_zone_hooks()
     _install_game_message_capture()
     _install_travel_hook()
+    _install_interaction_interception()
     _log('KerMP installed')
 
 
@@ -105,7 +114,7 @@ def teardown():
     The caller should abort the reload on a non-empty result, because the
     runtime may otherwise be left in an unknown half-dismantled state.
     """
-    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed
+    global _installed, _wall_callback_registered, _game_message_capture_installed, _timeline_suppression_installed, _interaction_interception_installed
     errors = []
     # Stop accepting new bridge events first.
     try:
@@ -129,6 +138,7 @@ def teardown():
     _wall_callback_registered = False
     _game_message_capture_installed = False
     _timeline_suppression_installed = False
+    _interaction_interception_installed = False
     _installed = False
     return errors
 
@@ -191,9 +201,9 @@ def _configure_simulation_authority(role):
                           'installed': False, 'local_simulation_enabled': role != 'client',
                           'clock_source': 'host' if role == 'client' else 'local',
                           'bypass': bool(_simulation_bypass), 'last_error': None}
-    if role != 'client':
-        return
-    _install_timeline_suppression()
+    if role == 'client':
+        _install_timeline_suppression()
+    bridge.emit('simulation.authority', dict(_simulation_status))
 
 
 def _install_timeline_suppression():
@@ -254,8 +264,43 @@ def _view_update_message_id():
         return None
 
 
+def _local_only_message_ids():
+    """Resolve client-local UI message ids from the installed build (S4MP model)."""
+    global _local_only_ids
+    if _local_only_ids is not None:
+        return _local_only_ids
+    ids = set()
+    try:
+        from protocolbuffers import Consts_pb2
+        for name in ('MSG_OBJECT_IS_INTERACTABLE', 'MSG_PIE_MENU_CREATE', 'MSG_PHONE_MENU_CREATE',
+                     'MSG_UI_DIALOG_SHOW', 'MSG_GAME_SAVE_LOCK_UNLOCK', 'MSG_SHOW_SIM_PROFILE'):
+            value = getattr(Consts_pb2, name, None)
+            if isinstance(value, int):
+                ids.add(value)
+    except Exception:
+        pass
+    _local_only_ids = ids
+    return ids
+
+
+def _classify_message(msg_id):
+    """Return 'local_only' or 'replicate' for a host outgoing message."""
+    if int(msg_id) in _local_only_message_ids():
+        return 'local_only'
+    return 'replicate'
+
+
+def message_capture_status():
+    return dict(_message_stats)
+
+
 def _install_game_message_capture():
-    """Observe host Client.send_message and forward native ViewUpdate bytes."""
+    """Observe host Client.send_message and replicate non-local game messages.
+
+    Host-originated messages are classified: client-local UI messages are never
+    replicated; everything else (ViewUpdate and other authoritative state) is
+    serialized, bounded, and forwarded through the sidecar.
+    """
     global _game_message_capture_installed
     if _game_message_capture_installed:
         return True
@@ -278,8 +323,11 @@ def _install_game_message_capture():
                 msg_id = kwargs.get('msg_id')
                 if msg_id is None and args:
                     msg_id = args[0]
-                expected = _view_update_message_id()
-                if expected is None or int(msg_id) != expected:
+                _message_stats['observed'] += 1
+                _message_stats['last_msg_id'] = int(msg_id)
+                classification = _classify_message(msg_id)
+                if classification == 'local_only':
+                    _message_stats['dropped_local'] += 1
                     return result
                 message = kwargs.get('msg')
                 if message is None:
@@ -288,13 +336,13 @@ def _install_game_message_capture():
                     message = args[1]
                 serializer = getattr(message, 'SerializeToString', None)
                 if not callable(serializer):
-                    _log('KERMP DISTRIBUTOR CAPTURE skipped reason=message_not_serializable')
+                    _message_stats['dropped_unserializable'] += 1
                     return result
                 raw = serializer()
                 if not isinstance(raw, (bytes, bytearray)):
                     raw = bytes(raw)
                 if len(raw) > _MAX_RAW_GAME_MESSAGE_BYTES:
-                    _log('KERMP DISTRIBUTOR CAPTURE skipped reason=payload_too_large size=%s' % len(raw))
+                    _message_stats['dropped_oversize'] += 1
                     return result
                 sent = bridge.emit('game.raw_message', {
                     'msg_id': int(msg_id),
@@ -302,12 +350,13 @@ def _install_game_message_capture():
                 })
                 if sent:
                     _view_updates_sent += 1
+                    _message_stats['replicated'] += 1
+                    _message_stats['by_id'][int(msg_id)] = _message_stats['by_id'].get(int(msg_id), 0) + 1
                     _last_view_update_size = len(raw)
                     _last_view_update_msg_id = int(msg_id)
-                    _log('KERMP DISTRIBUTOR CAPTURE msg_id=%s size=%s count=%s' %
-                         (msg_id, len(raw), _view_updates_sent))
             except Exception:
-                _log('KERMP DISTRIBUTOR CAPTURE ERROR %s' % traceback.format_exc())
+                _message_stats['last_error'] = traceback.format_exc()
+                _log('KERMP DISTRIBUTOR CAPTURE ERROR %s' % _message_stats['last_error'])
             return result
 
         wrapped._kermp_wrapped = True
@@ -329,6 +378,94 @@ def _raw_game_message(payload):
     if receive_raw_game_message(payload):
         _log('KERMP RAW MESSAGE RECEIVED msg_id=%s size=%s' %
              (payload.get('msg_id'), len(str(payload.get('payload_b64', '')))))
+
+
+def _coerce_id(value):
+    """Best-effort int id extraction from Sims param/instance objects."""
+    if value is None:
+        return None
+    for name in ('target_id', 'guid64', 'guid', 'id'):
+        try:
+            v = getattr(value, name, None)
+            if v is not None:
+                return int(v)
+        except Exception:
+            pass
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def interaction_status():
+    return dict(_interaction_stats)
+
+
+def _install_interaction_interception():
+    """Forward client interaction pushes to the host instead of local execution.
+
+    On a client, ``Sim.push_super_affordance`` is the funnel for pie-menu
+    selections (Sit, Go Here, object and social interactions). The client never
+    executes these locally: the (affordance, target, sim) tuple is normalized to
+    ids and emitted as an ``interaction.request`` for host-authoritative
+    execution. The host role is unaffected.
+    """
+    global _interaction_interception_installed
+    if _interaction_interception_installed:
+        return True
+    try:
+        from sims.sim import Sim
+        original = getattr(Sim, 'push_super_affordance', None)
+        if not callable(original):
+            _interaction_stats['last_error'] = 'push_super_affordance_missing'
+            return False
+        if getattr(original, '_kermp_wrapped', False):
+            _interaction_interception_installed = True
+            return True
+
+        def wrapped(self, affordance=None, *args, **kwargs):
+            if _sidecar_role != 'client':
+                return original(self, affordance, *args, **kwargs)
+            try:
+                affordance_id = _coerce_id(affordance)
+                target = kwargs.get('target')
+                if target is None and args:
+                    target = args[0]
+                target_id = _coerce_id(target)
+                sim_id = _coerce_id(self)
+                if affordance_id is None:
+                    _interaction_stats['dropped'] += 1
+                    _interaction_stats['last_error'] = 'affordance_id_unresolved'
+                    return None
+                _interaction_stats['forwarded'] += 1
+                _interaction_stats['last_affordance_id'] = affordance_id
+                _interaction_stats['last_target_id'] = target_id
+                _interaction_stats['last_sim_id'] = sim_id
+                bridge.emit('interaction.request', {
+                    'request_id': 'local-%s' % __import__('uuid').uuid4().hex,
+                    'affordance_id': str(affordance_id),
+                    'target_id': str(target_id) if target_id is not None else '0',
+                    'sim_id': str(sim_id) if sim_id is not None else '',
+                })
+                _log('KERMP INTERACTION FORWARDED affordance=%s target=%s sim=%s' %
+                     (affordance_id, target_id, sim_id))
+                return None
+            except Exception:
+                _interaction_stats['last_error'] = traceback.format_exc()
+                _log('KERMP INTERACTION FORWARD ERROR %s' % _interaction_stats['last_error'])
+                return None
+
+        wrapped._kermp_wrapped = True
+        wrapped._kermp_original = original
+        Sim.push_super_affordance = wrapped
+        _record_patch(Sim, 'push_super_affordance', original)
+        _interaction_interception_installed = True
+        _log('KERMP interaction interception installed Sim.push_super_affordance')
+        return True
+    except Exception:
+        _interaction_stats['last_error'] = traceback.format_exc()
+        _log('KERMP interaction interception unavailable: %s' % _interaction_stats['last_error'])
+        return False
 
 
 def enumerate_sims():

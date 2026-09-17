@@ -57,6 +57,43 @@ def kermp_simulation_status(_connection=None):
          status.get('local_simulation_enabled'), status.get('clock_source'), status.get('last_error') or 'none'))
 
 
+@sims4.commands.Command('kermp.play.status', command_type=sims4.commands.CommandType.Live)
+def kermp_play_status(_connection=None):
+    out = _out(_connection)
+    role = hooks._sidecar_role or 'unknown'
+    sim = hooks.simulation_status()
+    cap = hooks.message_capture_status()
+    inter = hooks.interaction_status()
+    zone_id = 0
+    try:
+        zone_id = services.current_zone_id()
+    except Exception:
+        pass
+    try:
+        import omega
+        omega_send = bool(callable(getattr(omega, 'send', None)))
+    except Exception:
+        omega_send = False
+    out('ROLE=%s' % role)
+    out('BRIDGE=%s zone_id=%s' % ('connected' if bool(bridge.sock) else 'disconnected', zone_id))
+    out('SIM_AUTHORITY suppression_installed=%s available=%s local_enabled=%s bypass=%s error=%s' %
+        (sim.get('installed'), sim.get('timeline_suppression_available'),
+         sim.get('local_simulation_enabled'), sim.get('bypass'), sim.get('last_error') or 'none'))
+    out('OMEGA send_available=%s' % omega_send)
+    out('CAPTURE installed=%s observed=%s replicated=%s dropped_local=%s error=%s' %
+        (getattr(hooks, '_game_message_capture_installed', False), cap.get('observed'),
+         cap.get('replicated'), cap.get('dropped_local'), (cap.get('last_error') or 'none').splitlines()[0] if cap.get('last_error') else 'none'))
+    out('INTERACTION forwarded=%s last_affordance=%s last_target=%s last_sim=%s error=%s' %
+        (inter.get('forwarded'), inter.get('last_affordance_id'), inter.get('last_target_id'),
+         inter.get('last_sim_id'), (inter.get('last_error') or 'none').splitlines()[0] if inter.get('last_error') else 'none'))
+    out('RX view_updates_received=%s TX view_updates_sent=%s' %
+        (getattr(hooks, '_view_updates_received', 0), getattr(hooks, '_view_updates_sent', 0)))
+    out('CONTROLLED_SIM=%s' % (hooks._active_sim_id() or 'none'))
+    out('BUILD_MODE build_owner=%s capture_available=%s apply_available=%s' %
+        (getattr(adapter, 'last_local_operation', None) and adapter.last_local_operation.get('op', 'none') or 'none',
+         'capture' in adapter.capabilities(), 'apply' in adapter.capabilities()))
+
+
 @sims4.commands.Command('kermp.distributor.status', command_type=sims4.commands.CommandType.Live)
 def kermp_distributor_status(_connection=None):
     result = inspect_distributor_boundary()

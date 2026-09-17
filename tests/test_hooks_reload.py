@@ -76,6 +76,47 @@ class HooksSandbox:
 
         scheduling.Timeline = Timeline
 
+        protocolbuffers = types.ModuleType('protocolbuffers')
+        protocolbuffers.__path__ = []
+        self._register('protocolbuffers', protocolbuffers)
+        consts = types.ModuleType('protocolbuffers.Consts_pb2')
+        self.consts = consts
+        self._register('protocolbuffers.Consts_pb2', consts)
+        consts.MSG_OBJECT_IS_INTERACTABLE = 100
+        consts.MSG_PIE_MENU_CREATE = 200
+        consts.MSG_OBJECTS_VIEW_UPDATE = 300
+        protocolbuffers.Consts_pb2 = consts
+
+        server = types.ModuleType('server')
+        server.__path__ = []
+        self._register('server', server)
+        client_mod = types.ModuleType('server.client')
+        self.server_client = client_mod
+        self._register('server.client', client_mod)
+        server.client = client_mod
+
+        class Client:
+            def send_message(self, msg_id, msg):
+                return 'sent'
+        client_mod.Client = Client
+
+        sims = types.ModuleType('sims')
+        sims.__path__ = []
+        self._register('sims', sims)
+        sim_mod = types.ModuleType('sims.sim')
+        self.sim_mod = sim_mod
+        self._register('sims.sim', sim_mod)
+        sims.sim = sim_mod
+
+        class Sim:
+            def __init__(self):
+                self.id = 42
+
+            def push_super_affordance(self, affordance=None, *args, **kwargs):
+                sandbox.calls.append(('push', affordance))
+                return 'result'
+        sim_mod.Sim = Sim
+
         spec = importlib.util.spec_from_file_location('kermp_mod.hooks', _KERMP_MOD / 'hooks.py')
         hooks = importlib.util.module_from_spec(spec)
         self._register('kermp_mod.hooks', hooks)
@@ -211,3 +252,64 @@ def test_simulation_suppression_teardown_restores():
         hooks._sidecar_role = 'client'
         assert hooks._install_timeline_suppression() is True
         assert getattr(sandbox.scheduling.Timeline.simulate, '_kermp_wrapped', False)
+
+
+def test_message_classification_local_only_vs_replicate():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        assert hooks._classify_message(100) == 'local_only'
+        assert hooks._classify_message(200) == 'local_only'
+        assert hooks._classify_message(300) == 'replicate'
+        assert hooks._classify_message(999) == 'replicate'
+
+
+def test_host_message_capture_replicates_non_local_only():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        hooks._sidecar_role = 'host'
+        assert hooks._install_game_message_capture() is True
+
+        class Msg:
+            def SerializeToString(self):
+                return b'data'
+
+        emitted = []
+        hooks.bridge.emit = lambda t, p: emitted.append((t, p)) or True
+        sandbox.server_client.Client().send_message(300, Msg())
+        sandbox.server_client.Client().send_message(100, Msg())
+        status = hooks.message_capture_status()
+        assert status['replicated'] == 1
+        assert status['dropped_local'] == 1
+        assert any(t == 'game.raw_message' for t, _ in emitted)
+
+
+def test_client_interaction_forwarded_not_executed():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        hooks._sidecar_role = 'client'
+        assert hooks._install_interaction_interception() is True
+        emitted = []
+        hooks.bridge.emit = lambda t, p: emitted.append((t, p)) or True
+        affordance = types.SimpleNamespace(guid64=123)
+        target = types.SimpleNamespace(id=7)
+        sim = sandbox.sim_mod.Sim()
+        result = sim.push_super_affordance(affordance, target)
+        assert result is None
+        assert sandbox.calls == []
+        requests = [p for t, p in emitted if t == 'interaction.request']
+        assert len(requests) == 1
+        assert requests[0]['affordance_id'] == '123'
+        assert requests[0]['target_id'] == '7'
+        assert requests[0]['sim_id'] == '42'
+
+
+def test_host_interaction_executes_locally():
+    with HooksSandbox() as sandbox:
+        hooks = sandbox.hooks
+        hooks._sidecar_role = 'host'
+        assert hooks._install_interaction_interception() is True
+        affordance = types.SimpleNamespace(guid64=123)
+        sim = sandbox.sim_mod.Sim()
+        result = sim.push_super_affordance(affordance)
+        assert result == 'result'
+        assert sandbox.calls == [('push', affordance)]

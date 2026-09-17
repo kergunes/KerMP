@@ -1,6 +1,8 @@
 import asyncio
 
+from kermp.bridge import BridgeEvent
 from kermp.net import KerMPHost, KerMPClient
+from kermp.protocol import MessageType
 from kermp.runtime import HostRuntime, ClientRuntime
 from kermp.session import HostSession
 
@@ -49,4 +51,24 @@ def test_runtime_handshake_without_game_bridge_client():
         await c.writer.wait_closed()
         host._server.close()
         await host._server.wait_closed()
+    asyncio.run(run())
+
+
+def test_client_readiness_transitions_on_simulation_authority():
+    async def run():
+        client = KerMPClient("c", "Client", "127.0.0.1", 0)
+        rt = ClientRuntime(client, bridge_port=0)
+        rt.loop = asyncio.get_running_loop()
+        sent = []
+
+        async def fake_send(typ, payload=None):
+            sent.append((typ, payload or {}))
+
+        client.send = fake_send
+        await rt._on_game_event(BridgeEvent("simulation.authority", {"role": "client", "installed": True}))
+        assert any(t == MessageType.READINESS and p.get("simulation_authority_ready") is True
+                   for t, p in sent)
+        await rt._on_game_event(BridgeEvent("simulation.authority", {"role": "client", "installed": False}))
+        assert any(t == MessageType.READINESS and p.get("simulation_authority_ready") is False
+                   for t, p in sent)
     asyncio.run(run())

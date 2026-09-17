@@ -48,6 +48,11 @@ class HostRuntime:
             })
             await self.host.broadcast(MessageType.READINESS, {"player_id": self.host.player_id, **readiness.snapshot()})
             return
+        if event.type == "simulation.authority":
+            readiness = self.host.session.update_readiness(self.host.player_id, bridge_connected=True,
+                                                           simulation_authority_ready=True)
+            await self.host.broadcast(MessageType.READINESS, {"player_id": self.host.player_id, **readiness.snapshot()})
+            return
 
         if event.type == MessageType.GAME_RAW_MESSAGE.value:
             try:
@@ -293,6 +298,12 @@ class ClientRuntime:
             # client simulation suppression has been safely installed.
             await self.client.send(MessageType.READINESS, {"bridge_connected": True,
                 "simulation_authority_ready": False})
+            return
+        if event.type == "simulation.authority":
+            status = dict(event.payload or {})
+            authority_ready = bool(status.get("role") == "client" and status.get("installed"))
+            await self.client.send(MessageType.READINESS, {"bridge_connected": True,
+                "simulation_authority_ready": authority_ready})
             return
         # A client only sends local input upstream; it never echoes host game messages.
         if event.type == MessageType.TRAVEL_REQUEST.value:
