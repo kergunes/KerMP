@@ -274,7 +274,10 @@ def watch(
         result = sync_once(install_dir, force=True)
         assert result is not None
         print("KerMP dev mode ready. generation=%s" % result.generation)
-        print("Open/restart The Sims 4 once after the first dev install.")
+        if result.initial_install:
+            print("First dev install: open/restart The Sims 4 once to load the stable reload bootstrap.")
+        else:
+            print("Existing dev install resumed; no restart is needed just for restarting this watcher.")
         print("Then edit source and run 'kermp.reload' in the game console after each accepted save.")
         last_seen = snapshot_sources()
         dirty_since: float | None = None
