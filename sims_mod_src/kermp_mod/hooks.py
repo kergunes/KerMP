@@ -1202,8 +1202,10 @@ def _interaction_request(payload):
     request_id = str(payload.get('request_id') or '')
     _interaction_stats['delivered'] += 1
     _interaction_stats['last_request_id'] = request_id
+    stage = 'resolve_sim'
     try:
         sim, affordance, target, context, interaction_kwargs = _resolve_interaction(payload)
+        stage = 'push_super_affordance'
         result = sim.push_super_affordance(affordance, target, context, **interaction_kwargs)
         if not result:
             raise ValueError('push_rejected')
@@ -1212,8 +1214,16 @@ def _interaction_request(payload):
         _log('KERMP INTERACTION STARTED request=%s sim=%s affordance=%s target=%s' %
              (request_id, payload.get('sim_id'), payload.get('affordance_id'), payload.get('target_id')))
     except Exception as exc:
-        bridge.emit('interaction.rejected', {'request_id': request_id, 'reason': '%s: %s' % (type(exc).__name__, exc)})
-        _log('KERMP INTERACTION REJECTED request=%s error=%s' % (request_id, exc))
+        reason = '%s:%s: %s' % (stage, type(exc).__name__, exc)
+        _interaction_stats['last_error'] = reason
+        bridge.emit('interaction.rejected', {
+            'request_id': request_id, 'sim_id': payload.get('sim_id'),
+            'affordance_id': payload.get('affordance_id'),
+            'target_id': payload.get('target_id'), 'resolve_stage': stage,
+            'reason': reason})
+        _log('KERMP INTERACTION REJECTED request=%s sim=%s affordance=%s target=%s stage=%s error=%s' %
+             (request_id, payload.get('sim_id'), payload.get('affordance_id'),
+              payload.get('target_id'), stage, exc))
 
 
 def _travel_prepare(payload):

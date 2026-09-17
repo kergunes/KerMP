@@ -136,7 +136,9 @@ class HostSession:
         if not affordance_id: raise ValueError("missing_affordance_id")
         result = {"request_id": request_id, "player_id": player_id, "sim_id": sim_id,
                   "affordance_id": affordance_id, "target_id": payload.get("target_id"),
-                  "position": payload.get("position"), "status": "accepted"}
+                  "position": payload.get("position"),
+                  "interaction_kwargs": dict(payload.get("interaction_kwargs") or {}),
+                  "status": "accepted"}
         self.interaction_requests[request_id] = result
         return result
 

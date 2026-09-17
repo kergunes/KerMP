@@ -207,3 +207,16 @@ def test_host_acceptance_is_delivered_to_local_game_for_apply():
         await rt._on_network_message(env)
         assert delivered == [(MessageType.INTERACTION_REQUEST.value, env.payload)]
     asyncio.run(run())
+
+
+def test_host_validation_preserves_client_interaction_intent():
+    session = HostSession()
+    session.add_player('c', 'Client')
+    session.update_sims([{'sim_id': '77', 'name': 'Bob'}])
+    session.select_sim('c', '77')
+    request = session.validate_interaction('r1', 'c', {
+        'sim_id': '77', 'affordance_id': '123', 'target_id': '0',
+        'position': {'translation': [1.0, 2.0, 3.0]},
+        'interaction_kwargs': {'picked_object_ids': [9]}})
+    assert request['position']['translation'] == [1.0, 2.0, 3.0]
+    assert request['interaction_kwargs'] == {'picked_object_ids': [9]}

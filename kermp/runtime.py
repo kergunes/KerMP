@@ -118,7 +118,13 @@ class HostRuntime:
             except ValueError as exc:
                 self.bridge.send(MessageType.INTERACTION_REJECTED.value, {'request_id': payload.get('request_id'), 'reason': str(exc)})
                 return
-            self.bridge.send(MessageType.INTERACTION_REQUEST.value, request)
+            delivered = self.bridge.send(MessageType.INTERACTION_REQUEST.value, request)
+            if not delivered:
+                failure = dict(request)
+                failure.update({'status': 'rejected', 'resolve_stage': 'host_game_bridge',
+                                'reason': 'host_game_bridge_disconnected'})
+                await self.host.broadcast(MessageType.INTERACTION_REJECTED, failure)
+                return
             await self.host.broadcast(MessageType.INTERACTION_ACCEPTED, request)
             return
 
@@ -227,7 +233,12 @@ class HostRuntime:
         elif env.type in (MessageType.SIM_SELECTION_STATE.value, MessageType.SIM_STATE.value):
             self.bridge.send(env.type, env.payload)
         elif env.type == MessageType.INTERACTION_ACCEPTED.value:
-            self.bridge.send(MessageType.INTERACTION_REQUEST.value, env.payload)
+            delivered = self.bridge.send(MessageType.INTERACTION_REQUEST.value, env.payload)
+            if not delivered:
+                failure = dict(env.payload)
+                failure.update({'status': 'rejected', 'resolve_stage': 'host_game_bridge',
+                                'reason': 'host_game_bridge_disconnected'})
+                await self.host.broadcast(MessageType.INTERACTION_REJECTED, failure)
         elif env.type == MessageType.INTERACTION_CANCEL.value:
             self.bridge.send(MessageType.INTERACTION_CANCEL.value, env.payload)
         elif env.type in (MessageType.INTERACTION_REJECTED.value, MessageType.INTERACTION_STARTED.value,
