@@ -48,6 +48,18 @@ def dev_watcher_running():
     return False
 
 
+def atomic_copy(source, destination):
+    temp = destination.with_name(destination.name + '.tmp-%s' % os.getpid())
+    try:
+        shutil.copy2(str(source), str(temp))
+        os.replace(str(temp), str(destination))
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def is_py37(exe):
     try:
         p = subprocess.run([exe, '--version'], capture_output=True, text=True)
@@ -112,14 +124,7 @@ def main():
         scripts_dir = INSTALL_DIR / 'Scripts'
         if scripts_dir.exists():
             shutil.rmtree(str(scripts_dir))
-        for name in ('.kermp-dev-manifest.json', '.kermp-reload-request.json',
-                     '.kermp-reload-ack.json', '.kermp-syncing'):
-            marker = INSTALL_DIR / name
-            try:
-                marker.unlink()
-            except FileNotFoundError:
-                pass
-    shutil.copy2(str(OUT), str(INSTALL_OUT))
+    atomic_copy(OUT, INSTALL_OUT)
     print('Built %s' % OUT)
     print('Installed %s' % INSTALL_OUT)
 
