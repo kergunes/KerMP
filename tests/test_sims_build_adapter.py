@@ -10,6 +10,7 @@ SimsBuildAdapter = _module.SimsBuildAdapter
 normalize_operation = _module.normalize_operation
 contour_delta = _module.contour_delta
 bind_call = _module.bind_call
+resolve_parent_context = _module.resolve_parent_context
 
 
 def test_normalize_captured_wall_operation():
@@ -124,3 +125,19 @@ def test_contour_delta_reports_changed_stable_identity():
     after = [{'wall_id': 9, 'level': 1, 'end': [2, 1]}]
     delta = contour_delta(before, after)
     assert delta['changed'][0]['identity'] == '9'
+
+
+def test_resolve_parent_context_parentless_uses_native_sentinels():
+    assert resolve_parent_context({}) == (0, (0, 0), 0)
+    assert resolve_parent_context({'parent_id': None}) == (0, (0, 0), 0)
+    assert resolve_parent_context({'parent_id': '0'}) == (0, (0, 0), 0)
+    assert resolve_parent_context({'parent_id': 0, 'parent_type_info': [0, 0], 'slot_hash': 0}) == (0, (0, 0), 0)
+
+
+def test_resolve_parent_context_preserves_slotted_values():
+    assert resolve_parent_context({'parent_id': '123', 'parent_type_info': [4, 5], 'slot_hash': 9876}) == (123, (4, 5), 9876)
+
+
+def test_resolve_parent_context_coerces_and_falls_back_safely():
+    assert resolve_parent_context({'parent_id': '7', 'parent_type_info': ['1', '2'], 'slot_hash': '55'}) == (7, (1, 2), 55)
+    assert resolve_parent_context({'parent_id': 'nonsense', 'parent_type_info': 'bad', 'slot_hash': 'x'}) == (0, (0, 0), 0)

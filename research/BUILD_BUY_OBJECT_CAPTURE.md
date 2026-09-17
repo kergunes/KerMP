@@ -36,3 +36,14 @@ re-emit. Host funds remain authoritative and are not reapplied by clients.
 Routing refresh was not added: the inspected move/create/destroy wrappers did
 not establish a safe additional planner API, so KerMP relies on the current
 object/build-buy calls until live routing evidence requires a targeted refresh.
+
+## Verified parentless move call shape
+
+Live native traces confirm `c_api_set_object_location_ex` is invoked for a
+parentless (root) object as
+`(zone_id, obj_id, routing_surface, Transform(Vector3, Quaternion), 0, (0, 0), 0)`.
+The trailing `parent_id=0`, `parent_type_info=(0, 0)`, and `slot_hash=0` are
+the root sentinels. Remote move apply must therefore supply these sentinels for
+parentless objects instead of passing `None`, otherwise `set_parent` does not
+commit the world transform and the postcondition check reports
+`move_postcondition_failed`.

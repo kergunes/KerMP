@@ -19,10 +19,16 @@ def parse_command(line: str) -> tuple[str, list[str]]:
 def move_payload(object_id: str, values: list[str]) -> dict:
     if len(values) != 7:
         raise ValueError("usage: move <object_id> <x> <y> <z> <qx> <qy> <qz> <qw>")
-    return {"object_id": str(object_id), "transform": {
-        "translation": [float(v) for v in values[:3]],
-        "orientation": [float(v) for v in values[3:]],
-    }}
+    return {
+        "object_id": str(object_id),
+        "transform": {
+            "translation": [float(v) for v in values[:3]],
+            "orientation": [float(v) for v in values[3:]],
+        },
+        "parent_id": "0",
+        "parent_type_info": [0, 0],
+        "slot_hash": 0,
+    }
 
 
 def buy_payload(object_id: str, definition_id: str, values: list[str] | None = None) -> dict:

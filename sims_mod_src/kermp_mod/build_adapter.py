@@ -155,6 +155,45 @@ def normalize_operation(payload):
     return normalized
 
 
+PARENTLESS_PARENT_ID = 0
+PARENTLESS_PARENT_TYPE_INFO = (0, 0)
+PARENTLESS_SLOT_HASH = 0
+
+
+def resolve_parent_context(data):
+    """Map remote parent fields to the native set_object_location_ex call shape.
+
+    Parentless objects use the root sentinels observed in live native calls:
+    parent_id=0, parent_type_info=(0, 0), slot_hash=0.
+    """
+    data = data or {}
+    parent_id = data.get('parent_id')
+    if parent_id is None or str(parent_id) in ('', '0'):
+        parent_id = PARENTLESS_PARENT_ID
+    else:
+        try:
+            parent_id = int(str(parent_id))
+        except (TypeError, ValueError):
+            parent_id = PARENTLESS_PARENT_ID
+    parent_type_info = data.get('parent_type_info')
+    if isinstance(parent_type_info, (list, tuple)):
+        try:
+            parent_type_info = tuple(int(x) for x in parent_type_info)
+        except (TypeError, ValueError):
+            parent_type_info = PARENTLESS_PARENT_TYPE_INFO
+    else:
+        parent_type_info = PARENTLESS_PARENT_TYPE_INFO
+    slot_hash = data.get('slot_hash')
+    if slot_hash is None or str(slot_hash) in ('', '0'):
+        slot_hash = PARENTLESS_SLOT_HASH
+    else:
+        try:
+            slot_hash = int(str(slot_hash))
+        except (TypeError, ValueError):
+            slot_hash = PARENTLESS_SLOT_HASH
+    return parent_id, parent_type_info, slot_hash
+
+
 class SimsBuildAdapter(object):
     def __init__(self):
         self._apply = None

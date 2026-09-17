@@ -9,7 +9,7 @@ import functools
 import traceback
 
 from .bridge_client import KerMPBridgeClient
-from .build_adapter import adapter, bind_call
+from .build_adapter import adapter, bind_call, resolve_parent_context
 
 bridge = KerMPBridgeClient()
 _installed = False
@@ -1170,6 +1170,7 @@ def _components(value, count):
 def _deserialize_transform(data, fallback=None):
     fallback_transform = getattr(fallback, 'transform', fallback)
     if not isinstance(data, dict):
+        _log('KERMP TRANSFORM DESERIALIZE skipped reason=not_dict type=%s' % type(data).__name__)
         return fallback_transform
     try:
         from sims4.math import Vector3, Quaternion, Transform
@@ -1186,7 +1187,8 @@ def _deserialize_transform(data, fallback=None):
             orientation = Quaternion(float(orientation.get('x', 0)), float(orientation.get('y', 0)),
                                      float(orientation.get('z', 0)), float(orientation.get('w', 1)))
         return Transform(position, orientation)
-    except Exception:
+    except Exception as exc:
+        _log('KERMP TRANSFORM DESERIALIZE ERROR %s: %s' % (type(exc).__name__, exc))
         return fallback_transform
 
 
@@ -1196,22 +1198,29 @@ def _deserialize_routing_surface(value, fallback=None):
     if not isinstance(value, dict):
         return value
     import routing
-    return routing.SurfaceIdentifier(int(value.get('primary_id', 0)),
-                                     int(value.get('secondary_id', 0)),
-                                     int(value.get('type', 0)))
+    try:
+        return routing.SurfaceIdentifier(int(value.get('primary_id', 0)),
+                                         int(value.get('secondary_id', 0)),
+                                         int(value.get('type', 0)))
+    except Exception as exc:
+        _log('KERMP ROUTING SURFACE DESERIALIZE ERROR %s: %s' % (type(exc).__name__, exc))
+        return getattr(fallback, 'routing_surface', None) if fallback is not None else None
 
 
 def _deserialize_location(data, fallback=None):
     if not isinstance(data, dict):
+        _log('KERMP LOCATION DESERIALIZE skipped reason=not_dict type=%s' % type(data).__name__)
         return fallback
     try:
         import routing
         transform = _deserialize_transform(data, fallback)
         if transform is None:
+            _log('KERMP LOCATION DESERIALIZE failed reason=transform_unavailable')
             return fallback
         surface = _deserialize_routing_surface(data.get('routing_surface'), fallback)
         return routing.Location(transform, surface)
-    except Exception:
+    except Exception as exc:
+        _log('KERMP LOCATION DESERIALIZE ERROR %s: %s' % (type(exc).__name__, exc))
         return fallback
 
 
@@ -1298,31 +1307,45 @@ def _apply_object_operation(operation):
 def _apply_object_location(obj, object_id, zone_id, data):
     import build_buy
     previous = getattr(obj, 'location', None)
-    transform = _deserialize_transform(data.get('transform'), previous)
+    transform_data = data.get('transform')
+    transform = _deserialize_transform(transform_data, previous)
     if transform is None:
-        raise ValueError('transform_unavailable')
-    routing_surface = data.get('routing_surface')
-    routing_surface = _deserialize_routing_surface(routing_surface, previous)
-    build_buy.c_api_set_object_location_ex(
-        zone_id, object_id, routing_surface, transform,
-        data.get('parent_id'), data.get('parent_type_info'), data.get('slot_hash'))
-    if not _position_matches(obj, data.get('transform')):
-        location = _deserialize_location(data.get('transform'), previous)
-        if location is None:
-            raise ValueError('location_unavailable')
+        raise ValueError('transform_unavailable data=%s' % _bounded_repr(transform_data))
+    routing_surface = _deserialize_routing_surface(data.get('routing_surface'), previous)
+    parent_id, parent_type_info, slot_hash = resolve_parent_context(data)
+    try:
+        native_result = build_buy.c_api_set_object_location_ex(
+            zone_id, object_id, routing_surface, transform,
+            parent_id, parent_type_info, slot_hash)
+    except Exception as exc:
+        raise ValueError('native_set_location_failed:%s:%s parent_id=%s parent_type_info=%s slot_hash=%s' %
+                         (type(exc).__name__, exc, parent_id, parent_type_info, slot_hash))
+    if _position_matches(obj, transform_data):
+        return True
+    location = _deserialize_location(transform_data, previous)
+    if location is None:
+        raise ValueError('location_unavailable transform=%s' % _bounded_repr(transform_data))
+    try:
+        obj.location = location
+    except Exception as exc:
+        raise TypeError('location_assignment:%s:%s' % (type(exc).__name__, exc))
+    if _position_matches(obj, transform_data):
+        return True
+    resend = getattr(obj, 'resend_location', None)
+    if callable(resend):
         try:
-            obj.location = location
+            resend()
         except Exception as exc:
-            raise TypeError('location_assignment:%s:%s' % (type(exc).__name__, exc))
-        if not _position_matches(obj, data.get('transform')):
-            resend = getattr(obj, 'resend_location', None)
-            if callable(resend):
-                try:
-                    resend()
-                except Exception as exc:
-                    raise TypeError('location_resend:%s:%s' % (type(exc).__name__, exc))
-    if not _position_matches(obj, data.get('transform')):
-        raise ValueError('move_postcondition_failed')
+            raise TypeError('location_resend:%s:%s' % (type(exc).__name__, exc))
+    if _position_matches(obj, transform_data):
+        return True
+    expected = (transform_data or {}).get('translation') or (transform_data or {}).get('position')
+    actual = _components(getattr(obj, 'position', None), 3)
+    raise ValueError(
+        'move_postcondition_failed expected_position=%s actual_position=%s native_result=%s '
+        'parent_id=%s parent_type_info=%s slot_hash=%s routing_surface=%s' %
+        (expected, actual, repr(native_result), parent_id, parent_type_info, slot_hash,
+         _json_value(routing_surface)))
 
 
 def _install_zone_hooks():

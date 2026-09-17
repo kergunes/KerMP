@@ -25,7 +25,8 @@ def test_command_parser_and_move_payload():
     assert parse_command("  travel 42 ") == ("travel", ["42"])
     assert parse_command("") == ("", [])
     assert move_payload("7", ["1", "2", "3", "0", "0", "0", "1"]) == {
-        "object_id": "7", "transform": {"translation": [1.0, 2.0, 3.0], "orientation": [0.0, 0.0, 0.0, 1.0]}}
+        "object_id": "7", "transform": {"translation": [1.0, 2.0, 3.0], "orientation": [0.0, 0.0, 0.0, 1.0]},
+        "parent_id": "0", "parent_type_info": [0, 0], "slot_hash": 0}
     assert buy_payload("9", "229977", ["1", "2", "3", "0", "0", "0", "1"]) == {
         "object_id": "9", "definition_id": "229977", "object_state": 0,
         "location_type": 1, "content_source": 0,
