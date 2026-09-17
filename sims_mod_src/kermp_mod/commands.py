@@ -4,10 +4,9 @@ import sims4.commands
 import services
 
 from . import hooks
-from .hooks import (bridge, probe_wall_contours, wall_event_probe, enumerate_sims,
-                    enumerate_objects, enumerate_affordances, inspect_distributor_boundary)
-from .hooks import _serialize_transform
 from .build_adapter import adapter, build_buy_surface
+
+bridge = hooks.bridge
 
 
 def _native_module():
@@ -35,7 +34,7 @@ def kermp_status(_connection=None):
 @sims4.commands.Command('kermp.core.status', command_type=sims4.commands.CommandType.Live)
 def kermp_core_status(_connection=None):
     out = _out(_connection)
-    sims = enumerate_sims()
+    sims = hooks.enumerate_sims()
     active = sims[0]['sim_id'] if len(sims) == 1 else 'unknown'
     out('role=%s player_id=local active_sim_id=%s connected_players=unknown' %
         (hooks._sidecar_role or 'unknown', active))
@@ -59,7 +58,7 @@ def kermp_simulation_status(_connection=None):
 
 @sims4.commands.Command('kermp.distributor.status', command_type=sims4.commands.CommandType.Live)
 def kermp_distributor_status(_connection=None):
-    result = inspect_distributor_boundary()
+    result = hooks.inspect_distributor_boundary()
     out = _out(_connection)
     out('modules=%s client_type=%s omega_type=%s omega_send_callable=%s capture_installed=%s error=%s omega_error=%s' %
         (','.join(result.get('modules') or []) or 'none',
@@ -80,7 +79,7 @@ def kermp_distributor_status(_connection=None):
 
 @sims4.commands.Command('kermp.sims', command_type=sims4.commands.CommandType.Live)
 def kermp_sims(_connection=None):
-    sims = enumerate_sims()
+    sims = hooks.enumerate_sims()
     bridge.emit('sims.state', {'sims': sims})
     out = _out(_connection)
     for sim in sims:
@@ -108,7 +107,7 @@ def kermp_interact(sim_id: str, affordance_id: str, target_id: str = '0', _conne
 @sims4.commands.Command('kermp.objects', command_type=sims4.commands.CommandType.Live)
 def kermp_objects(_connection=None):
     out = _out(_connection)
-    objects = enumerate_objects()
+    objects = hooks.enumerate_objects()
     for obj in objects:
         out('object_id=%s name=%s type=%s' % (obj['object_id'], obj['name'], obj['type']))
     if not objects:
@@ -153,7 +152,7 @@ def _inspect_transform(obj):
     location = _inspect_attr(obj, 'location', None)
     serialized = None
     try:
-        serialized = _serialize_transform(location)
+        serialized = hooks._serialize_transform(location)
     except Exception:
         pass
     if not isinstance(serialized, dict):
@@ -225,7 +224,7 @@ def kermp_object_inspect(object_id: str, _connection=None):
 def kermp_affordances(object_id: str, _connection=None):
     out = _out(_connection)
     try:
-        affordances = enumerate_affordances(object_id)
+        affordances = hooks.enumerate_affordances(object_id)
         for item in affordances:
             out('affordance_id=%s name=%s' % (item['affordance_id'], item['name']))
         if not affordances:
@@ -304,7 +303,7 @@ def kermp_build_status(_connection=None):
     surface = build_buy_surface()
     out('build_buy_module=%s candidates=%s' %
         (surface['module_available'], ','.join(surface['candidates'])))
-    event = wall_event_probe()
+    event = hooks.wall_event_probe()
     out('wall_callback_available=%s registered=%s events=%s' %
         (event['attribute_exists'], event['registered'], event['event_count']))
     object_status = hooks.build_object_status()
@@ -392,7 +391,7 @@ def kermp_build_replay_last(_connection=None):
 
 @sims4.commands.Command('kermp.build.probe', command_type=sims4.commands.CommandType.Live)
 def kermp_build_probe(_connection=None):
-    result = probe_wall_contours()
+    result = hooks.probe_wall_contours()
     snapshot = result['snapshot']
     out = _out(_connection)
     out('KerMP probe phase=%s callable=%s type=%s signature=%s count=%s' %
@@ -409,7 +408,7 @@ def kermp_build_probe(_connection=None):
 
 @sims4.commands.Command('kermp.build.eventprobe', command_type=sims4.commands.CommandType.Live)
 def kermp_build_eventprobe(_connection=None):
-    event = wall_event_probe()
+    event = hooks.wall_event_probe()
     out = _out(_connection)
     out('wall_callback_attribute_exists=%s type=%s callable=%s semantics=%s' %
         (event['attribute_exists'], event['type'], event['callable'],
