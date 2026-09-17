@@ -81,6 +81,17 @@ def main():
             for src, arc in files:
                 z.write(str(src), arc)
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+    if os.environ.get('KERMP_KEEP_DEV_SCRIPTS') != '1':
+        scripts_dir = INSTALL_DIR / 'Scripts'
+        if scripts_dir.exists():
+            shutil.rmtree(str(scripts_dir))
+        for name in ('.kermp-dev-manifest.json', '.kermp-reload-request.json',
+                     '.kermp-reload-ack.json', '.kermp-syncing'):
+            marker = INSTALL_DIR / name
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
     shutil.copy2(str(OUT), str(INSTALL_OUT))
     print('Built %s' % OUT)
     print('Installed %s' % INSTALL_OUT)
