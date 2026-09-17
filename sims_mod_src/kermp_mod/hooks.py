@@ -8,10 +8,14 @@ import base64
 import functools
 import traceback
 
-from .bridge_client import KerMPBridgeClient
 from .build_adapter import adapter, bind_call
+from .reload_core import wrapper_depth
+from .runtime_state import (
+    runtime, bridge, build_buy_enter_dispatch, build_buy_exit_dispatch,
+    wall_contour_dispatch,
+)
 
-bridge = KerMPBridgeClient()
+__kermp_hot_reload__ = True
 _installed = False
 _pending_travel_txn = None
 _wall_callback_registered = False
@@ -124,6 +128,84 @@ def simulation_status():
     return dict(_simulation_status)
 
 
+def can_hot_reload():
+    """Reject reload at runtime boundaries that cannot be made transactional."""
+    if _pending_travel_txn:
+        return {'ok': False, 'reason': 'travel_pending'}
+    if _travel_buffering:
+        return {'ok': False, 'reason': 'travel_buffering'}
+    if _build_capture_depth:
+        return {'ok': False, 'reason': 'build_capture_in_progress'}
+    if getattr(adapter, 'applying_remote', False):
+        return {'ok': False, 'reason': 'remote_build_apply_in_progress'}
+    return {'ok': True}
+
+
+def _wrapper_health():
+    result = {}
+    targets = (
+        ('game_message', 'server.client', 'Client', 'send_message'),
+        ('travel', 'world.travel_commands', None, 'travel_sims_to_zone'),
+        ('zone_spin_up', 'zone', 'Zone', 'do_zone_spin_up'),
+        ('build_move', 'build_buy', None, 'c_api_set_object_location_ex'),
+        ('build_funds', 'build_buy', None, 'c_api_modify_household_funds'),
+        ('build_create', 'objects.system', None, 'c_api_create_object'),
+        ('build_destroy', 'objects.system', None, 'c_api_destroy_object'),
+        ('build_parent', 'objects.system', None, 'c_api_set_parent_object'),
+        ('build_clear_parent', 'objects.system', None, 'c_api_clear_parent_object'),
+        ('build_definition', 'objects.client_object_mixin', 'ClientObjectMixin', 'set_definition'),
+        ('build_scale', 'objects.client_object_mixin', 'ClientObjectMixin', '_resend_client_scale'),
+    )
+    for label, module_name, class_name, attr in targets:
+        try:
+            module = __import__(module_name, fromlist=[class_name or attr])
+            target = getattr(module, class_name) if class_name else module
+            value = getattr(target, attr, None)
+            result[label] = wrapper_depth(value) if callable(value) else 0
+        except Exception:
+            result[label] = 0
+    return result
+
+
+def reload_health():
+    expected = {
+        'travel.prepare': _travel_prepare,
+        'travel.commit': _travel_commit,
+        'travel.view_batch': _travel_view_batch,
+        'travel.abort': _travel_abort,
+        'travel.resume': _travel_resume,
+        'build.apply': _build_apply,
+        'sidecar.welcome': _sidecar_welcome,
+        'sim.enumerate': _sim_enumerate,
+        'sim.select': _sim_select,
+        'interaction.request': _interaction_request,
+        'game.raw_message': _raw_game_message,
+    }
+    stale_handlers = []
+    for event_type, current in expected.items():
+        if bridge.handlers.get(event_type) is not current:
+            stale_handlers.append(event_type)
+    depths = _wrapper_health()
+    stacked = sorted(name for name, depth in depths.items() if depth > 1)
+    bridge_status = bridge.status()
+    reasons = []
+    if stale_handlers:
+        reasons.append('stale_handlers')
+    if stacked:
+        reasons.append('stacked_wrappers')
+    if not bridge_status.get('thread_alive'):
+        reasons.append('bridge_thread_dead')
+    return {
+        'ok': not reasons,
+        'reason': ','.join(reasons) if reasons else None,
+        'stale_handlers': stale_handlers,
+        'stacked_wrappers': stacked,
+        'wrapper_depths': depths,
+        'bridge': bridge_status,
+        'registrations': dict(runtime.registrations),
+    }
+
+
 def _view_update_message_id():
     try:
         from protocolbuffers import Consts_pb2
@@ -144,8 +226,7 @@ def _install_game_message_capture():
             _log('KERMP DISTRIBUTOR CAPTURE unavailable reason=Client.send_message_missing')
             return False
         if getattr(original, '_kermp_wrapped', False):
-            _game_message_capture_installed = True
-            return True
+            original = getattr(original, '_kermp_original', original)
 
         def wrapped(self, *args, **kwargs):
             global _view_updates_sent, _last_view_update_size, _last_view_update_msg_id
@@ -189,6 +270,7 @@ def _install_game_message_capture():
             return result
 
         wrapped._kermp_wrapped = True
+        wrapped._kermp_owner = 'KerMP'
         wrapped._kermp_original = original
         Client.send_message = wrapped
         _game_message_capture_installed = True
@@ -689,8 +771,10 @@ def _install_travel_hook():
         import inspect
         import world.travel_commands as travel_commands
         original = getattr(travel_commands, 'travel_sims_to_zone', None)
-        if not callable(original) or getattr(original, '_kermp_wrapped', False):
+        if not callable(original):
             return False
+        if getattr(original, '_kermp_wrapped', False):
+            original = getattr(original, '_kermp_original', original)
 
         def wrapped(*args, **kwargs):
             if _travel_native_bypass:
@@ -718,6 +802,7 @@ def _install_travel_hook():
             return None
 
         wrapped._kermp_wrapped = True
+        wrapped._kermp_owner = 'KerMP'
         wrapped._kermp_original = original
         travel_commands.travel_sims_to_zone = wrapped
         _log('KERMP natural travel hook installed signature=%s' % inspect.signature(original))
@@ -861,8 +946,13 @@ def inspect_wall_contour_callback():
 
 
 def _install_wall_contour_callback():
-    """Register only through an explicitly collection-like Zone callback list."""
+    """Register one persistent dispatcher into the Zone callback collection."""
     global _wall_callback_registered
+    if runtime.registrations.get('wall_contour_callback'):
+        _wall_callback_registered = True
+        result = inspect_wall_contour_callback()
+        result['registered'] = True
+        return result
     result = inspect_wall_contour_callback()
     if _wall_callback_registered or not result.get('attribute_exists'):
         return result
@@ -879,7 +969,8 @@ def _install_wall_contour_callback():
                 method_name = 'register'
         if method is None:
             return result
-        method(_wall_contour_update_callback)
+        method(wall_contour_dispatch)
+        runtime.registrations['wall_contour_callback'] = True
         _wall_callback_registered = True
         result['registration_method'] = method_name
         result['registered'] = True
@@ -903,20 +994,21 @@ def wall_event_probe():
 
 
 def _install_build_buy_hooks():
-    """Use the verified Build/Buy lifecycle callbacks for lease fallback.
-
-    These callbacks are not wall-operation capture: the installed game exposes
-    them as zero-argument enter/exit notifications only.
-    """
+    """Register stable dispatchers once; their targets change across reloads."""
+    if runtime.registrations.get('build_buy_lifecycle'):
+        return True
     try:
         import build_buy
         register_enter = getattr(build_buy, 'register_build_buy_enter_callback')
         register_exit = getattr(build_buy, 'register_build_buy_exit_callback')
-        register_enter(_on_build_buy_enter)
-        register_exit(_on_build_buy_exit)
+        register_enter(build_buy_enter_dispatch)
+        register_exit(build_buy_exit_dispatch)
+        runtime.registrations['build_buy_lifecycle'] = True
         _log('KERMP Build/Buy lifecycle hooks installed')
+        return True
     except Exception:
         _log('KERMP Build/Buy lifecycle hooks unavailable')
+        return False
 
 
 def _install_object_build_hooks():
@@ -983,10 +1075,11 @@ def _install_wrapper(label, factory):
             target = module
         original = getattr(target, attr)
         if getattr(original, '_kermp_wrapped', False):
-            return True
+            original = getattr(original, '_kermp_original', original)
         wrapped = factory(original)
         wrapped = functools.wraps(original)(wrapped)
         wrapped._kermp_wrapped = True
+        wrapped._kermp_owner = 'KerMP'
         wrapped._kermp_original = original
         setattr(target, attr, wrapped)
         _build_hook_info[label]['installed'] = True
@@ -1287,8 +1380,10 @@ def _install_zone_hooks():
     except Exception:
         return
     original = getattr(Zone, 'do_zone_spin_up', None)
-    if original is None or getattr(original, '_kermp_wrapped', False):
+    if original is None:
         return
+    if getattr(original, '_kermp_wrapped', False):
+        original = getattr(original, '_kermp_original', original)
 
     def wrapped(self, household_id, active_sim_id, *args, **kwargs):
         result = original(self, household_id, active_sim_id, *args, **kwargs)
@@ -1299,6 +1394,8 @@ def _install_zone_hooks():
         return result
 
     wrapped._kermp_wrapped = True
+    wrapped._kermp_owner = 'KerMP'
+    wrapped._kermp_original = original
     Zone.do_zone_spin_up = wrapped
 
 
