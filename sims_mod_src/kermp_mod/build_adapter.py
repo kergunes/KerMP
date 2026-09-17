@@ -161,6 +161,7 @@ class SimsBuildAdapter(object):
         self._capture = None
         self._seen = set()
         self.last_local_operation = None
+        self.last_operation_by_type = {}
         self.last_remote_operation = None
         self.applying_remote = False
         self.probe_before = None
@@ -187,6 +188,7 @@ class SimsBuildAdapter(object):
         self.last_capture = None
         self.last_capture_error = None
         self.last_local_operation = None
+        self.last_operation_by_type = {}
         self.last_error = None
         self._last_definition = {}
         self._capture_sequence = 0
@@ -219,6 +221,7 @@ class SimsBuildAdapter(object):
         self._capture_sequence += 1
         operation['op_id'] = str(payload.get('op_id') or 'local-%s' % self._capture_sequence)
         self.last_local_operation = operation
+        self.last_operation_by_type[operation['op']] = operation
         self.last_capture = operation
         self.captured_total += 1
         self.operation_counts[operation['op']] = self.operation_counts.get(operation['op'], 0) + 1

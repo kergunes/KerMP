@@ -81,6 +81,14 @@ def test_capture_counters_ids_and_duplicate_definition_filter():
     assert adapter.suppressed_remote_echo == 1
 
 
+def test_last_operation_by_type_preserves_object_create_after_scale():
+    adapter = SimsBuildAdapter()
+    create = adapter.capture_local({'op': 'object.create', 'data': {'object_id': 7, 'definition_id': 8}})
+    adapter.capture_local({'op': 'object.scale', 'data': {'object_id': 7, 'scale': 1.0}})
+    assert adapter.last_local_operation['op'] == 'object.scale'
+    assert adapter.last_operation_by_type['object.create'] == create
+
+
 def test_bind_call_handles_verified_sims_names_positionally_and_by_keyword():
     def create(zone_id, def_id, obj_id, obj_state=None, loc_type=None, content_source=None):
         return True

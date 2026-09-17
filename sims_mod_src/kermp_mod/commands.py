@@ -6,6 +6,7 @@ import services
 from . import hooks
 from .hooks import (bridge, probe_wall_contours, wall_event_probe, enumerate_sims,
                     enumerate_objects, enumerate_affordances, inspect_distributor_boundary)
+from .hooks import _serialize_transform
 from .build_adapter import adapter, build_buy_surface
 
 
@@ -112,6 +113,76 @@ def kermp_objects(_connection=None):
         out('object_id=%s name=%s type=%s' % (obj['object_id'], obj['name'], obj['type']))
     if not objects:
         out('no loaded objects found')
+
+
+def _inspect_value(value, fallback='unknown'):
+    try:
+        value = value() if callable(value) else value
+    except Exception:
+        return fallback
+    return fallback if value is None else value
+
+
+def _inspect_attr(obj, name, fallback='unknown'):
+    try:
+        return _inspect_value(getattr(obj, name), fallback)
+    except Exception:
+        return fallback
+
+
+def _inspect_object_lines(obj):
+    definition = _inspect_attr(obj, 'definition', None)
+    definition_id = _inspect_attr(definition, 'id', None)
+    if definition_id is None:
+        definition_id = _inspect_attr(obj, 'definition_id', 'unknown')
+    name = _inspect_attr(obj, 'name', None)
+    if name is None and definition is not None:
+        name = _inspect_attr(definition, 'name', None)
+    if name is None and definition is not None:
+        name = _inspect_attr(definition, 'display_name', 'unknown')
+    location = _inspect_attr(obj, 'location', None)
+    transform = _serialize_transform(location) or {}
+    position = transform.get('translation') or ['unknown', 'unknown', 'unknown']
+    orientation = transform.get('orientation') or ['unknown', 'unknown', 'unknown', 'unknown']
+    parent = _inspect_attr(obj, 'parent', None)
+    parent_id = _inspect_attr(parent, 'id', None) if parent is not None else None
+    if parent_id is None:
+        parent_id = _inspect_attr(obj, 'parent_id', 'none')
+    routing_surface = transform.get('routing_surface')
+    if routing_surface is None:
+        routing_surface = _inspect_attr(obj, 'routing_surface', 'unknown')
+    if isinstance(routing_surface, (dict, list, tuple)):
+        routing_surface = json.dumps(routing_surface, sort_keys=True, separators=(',', ':'))
+    return [
+        'object_id=%s' % _inspect_attr(obj, 'id'),
+        'definition_id=%s' % definition_id,
+        'name=%s' % _inspect_value(name),
+        'type=%s' % type(obj).__name__,
+        'scale=%s' % _inspect_attr(obj, 'scale'),
+        'position=%s' % ','.join(str(item) for item in position),
+        'orientation=%s' % ','.join(str(item) for item in orientation),
+        'parent_id=%s' % parent_id,
+        'routing_surface=%s' % routing_surface,
+    ]
+
+
+@sims4.commands.Command('kermp.object.inspect', command_type=sims4.commands.CommandType.Live)
+def kermp_object_inspect(object_id: str, _connection=None):
+    out = _out(_connection)
+    object_id = str(object_id)
+    try:
+        obj = services.object_manager().get(int(object_id))
+    except Exception as exc:
+        out('object_inspect_failed=%s' % exc)
+        return
+    if obj is None:
+        out('object_not_found=%s' % object_id)
+        return
+    try:
+        for line in _inspect_object_lines(obj):
+            out(line)
+    except Exception as exc:
+        out('object_inspect_failed=%s' % exc)
 
 
 @sims4.commands.Command('kermp.affordances', command_type=sims4.commands.CommandType.Live)
@@ -221,6 +292,12 @@ def kermp_build_status(_connection=None):
         (local.get('op', 'none'), (local.get('data') or {}).get('object_id', 'none'), local.get('op_id', 'none')))
     out('last_remote_type=%s last_error=%s' %
         (remote.get('op', 'none'), status.get('last_error') or 'none'))
+
+
+@sims4.commands.Command('kermp.build.last-create', command_type=sims4.commands.CommandType.Live)
+def kermp_build_last_create(_connection=None):
+    operation = adapter.last_operation_by_type.get('object.create')
+    _out(_connection)('last_create=%s' % (json.dumps(operation, sort_keys=True) if operation else 'none'))
 
 
 @sims4.commands.Command('kermp.build.object.status', command_type=sims4.commands.CommandType.Live)
