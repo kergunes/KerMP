@@ -11,8 +11,16 @@
   `5F9DBF9B647EEDE80FCB0FC8330107594251DD78B54E4FF9C103015AAF791A8C`.
 - Historical reference: `princess2010/ts4multiplayer`, branch `alpha1`, commit
   `992ff752deb83edb7a2ddebd442e3ae0e2795b86`.
-- The active Mods tree was checked before investigation. No S4MP or SimSync
-  script/package was present; KerMP was the only multiplayer-control mod.
+- The active Mods tree on disk was checked before packaging. No S4MP or SimSync
+  script/package is currently present; KerMP is the only multiplayer-control
+  mod on disk.
+- **CONTAMINATED PROCESS — DO NOT USE AS KERMP EVIDENCE:** the Sims process that
+  remained open while the development files were installed produced fresh
+  `lastException` reports at 17:02 from obfuscated `sims4multiplayer` modules
+  (`reload_service`, `client_overrides`, `inspector_manager`, and
+  `clock_manager`). S4MP had therefore already been imported into that process
+  before its files were removed. All further runtime evidence requires a full
+  Sims exit, `localthumbcache.package` removal, and clean restart.
 
 Labels in this document are intentionally strict:
 
@@ -241,7 +249,9 @@ kermp.trace.dump 300
 
 ## One decisive next runtime experiment
 
-Use KerMP only; restart Sims fully after installing the development build.
+Use KerMP only. Fully exit the currently contaminated Sims process, remove
+`localthumbcache.package`, restart the KerMP sidecar, and restart Sims after
+installing the development build.
 
 1. On CLIENT run `kermp.trace.registry`, `kermp.trace.clients`, then
    `kermp.trace.start`.
