@@ -159,6 +159,7 @@ class KerMPGui(tk.Tk):
         self.action = ttk.Button(buttons, text="HOST GAME", command=self._start); self.action.pack(side="left")
         ttk.Button(buttons, text="Stop / Disconnect", command=self.controller.stop).pack(side="left", padx=8)
         ttk.Button(buttons, text="Copy address", command=self._copy_address).pack(side="left")
+        ttk.Button(buttons, text="Run Preflight", command=self._run_preflight).pack(side="left", padx=8)
         ttk.Button(buttons, text="Build / Install Sims Mod", command=self._build_mod).pack(side="right")
         status = ttk.LabelFrame(root, text="Live status", padding=12); status.pack(fill="x")
         self.status_text = tk.StringVar(); ttk.Label(status, textvariable=self.status_text, justify="left").pack(anchor="w")
@@ -214,6 +215,11 @@ class KerMPGui(tk.Tk):
         import subprocess, sys
         subprocess.Popen([sys.executable, "-m", "sims_mod_src.build"], cwd=str(Path(__file__).parents[1]))
         self._write_log("Started Sims mod build; see console/output for Python 3.7 result.")
+    def _run_preflight(self):
+        from . import preflight
+        report = "\n".join(preflight.run_preflight())
+        self._write_log("Preflight:\n" + report)
+        messagebox.showinfo("KerMP Preflight", report)
     def _close(self):
         self.controller.stop(); self.after(250, self.destroy)
 
