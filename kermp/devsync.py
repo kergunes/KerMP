@@ -15,7 +15,6 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -59,6 +58,14 @@ def default_install_dir() -> Path:
     if user_dir:
         return Path(user_dir) / "Mods" / "KerMP"
     return Path.home() / "Documents" / "Electronic Arts" / "The Sims 4" / "Mods" / "KerMP"
+
+
+class SourceChangedDuringValidation(RuntimeError):
+    """The editor saved again while a candidate generation was being validated."""
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def _sha256(path: Path) -> str:
@@ -110,14 +117,6 @@ def _atomic_write_json(path: Path, value: dict) -> None:
     _atomic_write_bytes(path, raw)
 
 
-def _atomic_copy(source: Path, destination: Path) -> None:
-    _atomic_write_bytes(destination, source.read_bytes())
-    try:
-        shutil.copystat(source, destination)
-    except OSError:
-        pass
-
-
 def _default_build_archive() -> None:
     env = os.environ.copy()
     env["KERMP_KEEP_DEV_SCRIPTS"] = "1"
@@ -153,12 +152,29 @@ def sync_once(
     # It runs before the loose-source generation becomes visible to the game.
     build_archive()
 
+    # Editors can save while the Python 3.7 subprocess is compiling. Never
+    # publish bytes that were not part of the exact tree we just validated.
+    after_build = snapshot_sources(source_root)
+    if after_build != current:
+        raise SourceChangedDuringValidation(
+            "source changed while Python 3.7 validation was running"
+        )
+
+    staged: dict[str, bytes] = {}
+    for relative in changed:
+        data = (source_root / relative).read_bytes()
+        if _sha256_bytes(data) != current[relative]:
+            raise SourceChangedDuringValidation(
+                "source changed while staging %s" % relative
+            )
+        staged[relative] = data
+
     generation = int(old_manifest.get("generation", 0) or 0) + 1
     scripts_root.mkdir(parents=True, exist_ok=True)
     _atomic_write_json(syncing_path, {"generation": generation, "pid": os.getpid()})
     try:
         for relative in changed:
-            _atomic_copy(source_root / relative, target_root / relative)
+            _atomic_write_bytes(target_root / relative, staged[relative])
         for relative in deleted:
             destination = target_root / relative
             try:
@@ -279,13 +295,19 @@ def watch(
         else:
             print("Existing dev install resumed; no restart is needed just for restarting this watcher.")
         print("Then edit source and run 'kermp.reload' in the game console after each accepted save.")
-        last_seen = snapshot_sources()
+        manifest = _read_json(scripts_root / MANIFEST_NAME)
+        published = dict(manifest.get("files") or {})
+        candidate = dict(published)
         dirty_since: float | None = None
         while True:
             time.sleep(poll_seconds)
             observed = snapshot_sources()
-            if observed != last_seen:
-                last_seen = observed
+            if observed == published:
+                candidate = dict(observed)
+                dirty_since = None
+                continue
+            if observed != candidate:
+                candidate = dict(observed)
                 dirty_since = time.monotonic()
                 continue
             if dirty_since is None or time.monotonic() - dirty_since < debounce_seconds:
@@ -302,14 +324,25 @@ def watch(
                             ",".join(result.restart_required) or "none",
                         )
                     )
+                manifest = _read_json(scripts_root / MANIFEST_NAME)
+                published = dict(manifest.get("files") or {})
+                candidate = dict(published)
+                dirty_since = None
+            except SourceChangedDuringValidation as exc:
+                # A newer save superseded the candidate while validation ran.
+                # Force the next poll to debounce and validate that newer tree.
+                print("KerMP sync superseded by newer save: %s" % exc)
+                candidate = dict(published)
+                dirty_since = None
             except subprocess.CalledProcessError as exc:
+                # Invalid source remains unpublished. Wait for the next edit
+                # rather than recompiling the same broken generation forever.
                 print("KerMP sync rejected: Python 3.7 build failed (exit=%s)." % exc.returncode)
+                candidate = dict(observed)
+                dirty_since = None
             except Exception as exc:
                 print("KerMP sync rejected: %s: %s" % (type(exc).__name__, exc))
-            finally:
-                # Re-read the actual tree: editors may have saved again while
-                # compilation was running.
-                last_seen = snapshot_sources()
+                candidate = dict(observed)
                 dirty_since = None
 
 
